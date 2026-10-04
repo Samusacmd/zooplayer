@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -13,6 +14,8 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.ButtonDefaults
@@ -572,22 +575,33 @@ private fun Context.trovaActivity(): Activity? {
     return null
 }
 
+/** Dopo quanto spariscono i comandi del video a schermo intero (telefono). */
+private const val SCOMPARSA_COMANDI_MS = 2500L
+
+/** Su TV si naviga col D-pad: serve più tempo per spostarsi tra i pulsanti. */
+private const val SCOMPARSA_COMANDI_TV_MS = 3000L
+
 /**
- * Player a tutto schermo.
- * - Video: comandi sovrapposti che spariscono dopo 4 s di riproduzione; tocco (o tasto del telecomando) li fa ricomparire.
- * - Schermo intero: nasconde le barre di sistema e, per i video, ruota in orizzontale.
- * - In orizzontale i comandi sono compatti.
+ * Player.
+ * - Video in verticale: video sopra, comandi sotto, sempre visibili.
+ * - Video in orizzontale: schermo intero automatico; un tocco mostra i comandi, che spariscono
+ *   dopo SCOMPARSA_COMANDI_MS dall'ultima interazione (restano visibili in pausa).
+ * - Pulsante schermo intero: blocca il video in orizzontale finché non lo si ripreme (o Indietro).
+ * - Audio: comandi sempre visibili.
  */
 @Composable
 private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
     val view = LocalView.current
-    val activity = LocalContext.current.trovaActivity()
+    val ctx = LocalContext.current
+    val activity = ctx.trovaActivity()
+    val tv = remember { ctx.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) }
     val orizzontale = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
-    var schermoIntero by remember { mutableStateOf(false) }
+    var bloccato by remember { mutableStateOf(false) }
+    val immersivo = s.video && (orizzontale || bloccato)
     var visibili by remember { mutableStateOf(true) }
     var tocchi by remember { mutableIntStateOf(0) }
+    var trascinando by remember { mutableStateOf(false) }
     val fuocoRadice = remember { FocusRequester() }
-    val compatti = orizzontale || schermoIntero
     val tocca = { tocchi++; visibili = true }
 
     DisposableEffect(Unit) {
@@ -596,17 +610,18 @@ private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
     }
 
     // barre di sistema e orientamento
-    DisposableEffect(schermoIntero, s.video) {
+    DisposableEffect(immersivo, bloccato, s.video) {
         if (activity != null) {
             val ctrl = WindowCompat.getInsetsController(activity.window, view)
-            if (schermoIntero) {
+            if (immersivo) {
                 ctrl.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 ctrl.hide(WindowInsetsCompat.Type.systemBars())
-                if (s.video) activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             } else {
                 ctrl.show(WindowInsetsCompat.Type.systemBars())
-                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             }
+            activity.requestedOrientation =
+                if (bloccato && s.video) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
         onDispose {
             if (activity != null) {
@@ -616,10 +631,13 @@ private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
         }
     }
 
-    // scomparsa automatica dei comandi (solo video in riproduzione)
-    LaunchedEffect(visibili, tocchi, s.inRiproduzione, s.video) {
-        if (visibili && s.video && s.inRiproduzione) {
-            delay(4000)
+    // entrando a schermo intero si vede solo il video; uscendo i comandi tornano fissi
+    LaunchedEffect(immersivo) { visibili = !immersivo }
+
+    // scomparsa dei comandi a schermo intero
+    LaunchedEffect(visibili, tocchi, immersivo, trascinando, s.inRiproduzione) {
+        if (immersivo && visibili && !trascinando && s.inRiproduzione) {
+            delay(if (tv) SCOMPARSA_COMANDI_TV_MS else SCOMPARSA_COMANDI_MS)
             visibili = false
             try {
                 fuocoRadice.requestFocus()
@@ -628,13 +646,18 @@ private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
         }
     }
 
-    BackHandler(enabled = schermoIntero) { schermoIntero = false }
+    // se non è un video non ha senso restare bloccati in orizzontale
+    LaunchedEffect(s.video) { if (!s.video) bloccato = false }
 
-    val comandi: @Composable (Modifier) -> Unit = { mod ->
+    BackHandler(enabled = bloccato) { bloccato = false }
+
+    val comandi: @Composable (Modifier, Boolean) -> Unit = { mod, compatti ->
         ComandiPlayer(
-            s = s, compatti = compatti, schermoIntero = schermoIntero,
+            s = s, compatti = compatti,
+            mostraSchermoIntero = s.video, schermoIntero = bloccato,
             onTocco = tocca,
-            onSchermoIntero = { tocca(); schermoIntero = !schermoIntero },
+            onTrascina = { trascinando = it; tocca() },
+            onSchermoIntero = { tocca(); bloccato = !bloccato },
             onChiudi = onChiudi,
             modifier = mod,
         )
@@ -646,7 +669,7 @@ private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
             .background(Color.Black)
             .focusRequester(fuocoRadice)
             .onPreviewKeyEvent { e ->
-                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                if (e.type != KeyEventType.KeyDown || !immersivo) return@onPreviewKeyEvent false
                 if (!visibili) {
                     tocca()   // il primo tasto del telecomando mostra solo i comandi
                     true
@@ -658,31 +681,55 @@ private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
             .focusable()
     ) {
         if (s.video) {
-            AndroidView(
-                factory = { c -> VLCVideoLayout(c).also { Riproduttore.agganciaVideo(it) } },
-                modifier = Modifier.fillMaxSize(),
-                onRelease = { Riproduttore.sganciaVideo() },
-            )
-            // strato trasparente sopra il video: il tocco mostra/nasconde i comandi
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
-                        if (visibili) visibili = false else tocca()
-                    }
-            )
-            if (s.buffering) CircularProgressIndicator(Modifier.align(Alignment.Center))
-            AnimatedVisibility(
-                visible = visibili, enter = fadeIn(), exit = fadeOut(),
-                modifier = Modifier.align(Alignment.BottomCenter),
-            ) {
-                comandi(
+            // un solo VLCVideoLayout per tutti i layout: ruotando il video non si interrompe
+            Column(Modifier.fillMaxSize()) {
+                Box(
                     Modifier
+                        .weight(1f)
                         .fillMaxWidth()
-                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))))
-                        .windowInsetsPadding(WindowInsets.safeDrawing)
-                        .padding(top = 24.dp)
-                )
+                        .then(if (immersivo) Modifier else Modifier.windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)))
+                ) {
+                    AndroidView(
+                        factory = { c -> VLCVideoLayout(c).also { Riproduttore.agganciaVideo(it) } },
+                        modifier = Modifier.fillMaxSize(),
+                        onRelease = { Riproduttore.sganciaVideo() },
+                    )
+                    if (immersivo) {
+                        // strato trasparente sopra il video: il tocco mostra/nasconde i comandi
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                                    if (visibili) visibili = false else tocca()
+                                }
+                        )
+                    }
+                    if (s.buffering) CircularProgressIndicator(Modifier.align(Alignment.Center))
+                }
+                if (!immersivo) {
+                    comandi(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF121212))
+                            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)),
+                        false,
+                    )
+                }
+            }
+            if (immersivo) {
+                AnimatedVisibility(
+                    visible = visibili, enter = fadeIn(), exit = fadeOut(),
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                ) {
+                    comandi(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))))
+                            .windowInsetsPadding(WindowInsets.safeDrawing)
+                            .padding(top = 24.dp),
+                        true,
+                    )
+                }
             }
         } else {
             // audio: cover + comandi sempre visibili; in orizzontale affiancati
@@ -704,7 +751,7 @@ private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
                         cover(Modifier.fillMaxHeight(0.9f).aspectRatio(1f))
                         if (s.buffering) CircularProgressIndicator()
                     }
-                    comandi(Modifier.weight(1.3f))
+                    comandi(Modifier.weight(1.3f), true)
                 }
             } else {
                 Column(contenitore) {
@@ -712,7 +759,7 @@ private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
                         cover(Modifier.fillMaxHeight(0.85f).aspectRatio(1f))
                         if (s.buffering) CircularProgressIndicator()
                     }
-                    comandi(Modifier.fillMaxWidth().background(Color(0xFF121212)))
+                    comandi(Modifier.fillMaxWidth().background(Color(0xFF121212)), false)
                 }
             }
         }
@@ -737,8 +784,10 @@ private fun TastoPlayer(etichetta: String, dimensione: TextUnit, pad: PaddingVal
 private fun ComandiPlayer(
     s: StatoPlayer,
     compatti: Boolean,
+    mostraSchermoIntero: Boolean,
     schermoIntero: Boolean,
     onTocco: () -> Unit,
+    onTrascina: (Boolean) -> Unit,
     onSchermoIntero: () -> Unit,
     onChiudi: () -> Unit,
     modifier: Modifier = Modifier,
@@ -761,10 +810,11 @@ private fun ComandiPlayer(
             Text(tempo(s.posizione), color = GRIGIO, fontSize = 11.sp)
             Slider(
                 value = trascina ?: frac,
-                onValueChange = { onTocco(); trascina = it },
+                onValueChange = { if (trascina == null) onTrascina(true); trascina = it },
                 onValueChangeFinished = {
                     trascina?.let { Riproduttore.vaiA((it * s.durata).toLong()) }
                     trascina = null
+                    onTrascina(false)
                 },
                 enabled = s.durata > 0,
                 modifier = Modifier.weight(1f).padding(horizontal = 8.dp).height(if (compatti) 28.dp else 40.dp),
@@ -786,12 +836,14 @@ private fun ComandiPlayer(
             TastoPlayer("+10", testo, pad, onTocco) { Riproduttore.salta(10_000) }
             TastoIcona(R.drawable.ic_successivo, "Successivo", iconaPiccola, pad, onTocco) { Riproduttore.successivo() }
             TastoIcona(R.drawable.ic_stop, "Ferma", iconaPiccola, pad, onTocco) { Riproduttore.ferma() }
-            IconButton(onClick = onSchermoIntero, modifier = Modifier.size(if (compatti) 36.dp else 44.dp)) {
-                Icon(
-                    painterResource(if (schermoIntero) R.drawable.ic_esci_schermo_intero else R.drawable.ic_schermo_intero),
-                    contentDescription = if (schermoIntero) "Esci da schermo intero" else "Schermo intero",
-                    tint = Color.White,
-                )
+            if (mostraSchermoIntero) {
+                IconButton(onClick = onSchermoIntero, modifier = Modifier.size(if (compatti) 36.dp else 44.dp)) {
+                    Icon(
+                        painterResource(if (schermoIntero) R.drawable.ic_esci_schermo_intero else R.drawable.ic_schermo_intero),
+                        contentDescription = if (schermoIntero) "Esci da schermo intero" else "Schermo intero",
+                        tint = if (schermoIntero) ARANCIO else Color.White,
+                    )
+                }
             }
         }
         if (!compatti) {
