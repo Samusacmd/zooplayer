@@ -1,6 +1,34 @@
 package it.sam.zooplayer
 
 import android.widget.Toast
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import kotlinx.coroutines.delay
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -520,31 +548,146 @@ private fun MiniPlayer(s: StatoPlayer, onApri: () -> Unit) {
                 LinearProgressIndicator(progress = { frac }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
             }
             TextButton(onClick = { Riproduttore.salta(-10_000) }) { Text("−10") }
-            TextButton(onClick = { Riproduttore.playPausa() }) { Text(if (s.inRiproduzione) "⏸" else "▶", fontSize = 20.sp) }
+            IconButton(onClick = { Riproduttore.playPausa() }) {
+                Icon(
+                    painterResource(if (s.inRiproduzione) R.drawable.ic_pausa else R.drawable.ic_play),
+                    contentDescription = if (s.inRiproduzione) "Pausa" else "Riproduci",
+                    tint = ARANCIO, modifier = Modifier.size(28.dp),
+                )
+            }
             TextButton(onClick = { Riproduttore.salta(10_000) }) { Text("+10") }
-            TextButton(onClick = { Riproduttore.ferma() }) { Text("✕") }
+            IconButton(onClick = { Riproduttore.ferma() }) {
+                Icon(painterResource(R.drawable.ic_chiudi), contentDescription = "Ferma", tint = GRIGIO, modifier = Modifier.size(20.dp))
+            }
         }
     }
 }
 
+private fun Context.trovaActivity(): Activity? {
+    var c: Context? = this
+    while (c is ContextWrapper) {
+        if (c is Activity) return c
+        c = c.baseContext
+    }
+    return null
+}
+
+/**
+ * Player a tutto schermo.
+ * - Video: comandi sovrapposti che spariscono dopo 4 s di riproduzione; tocco (o tasto del telecomando) li fa ricomparire.
+ * - Schermo intero: nasconde le barre di sistema e, per i video, ruota in orizzontale.
+ * - In orizzontale i comandi sono compatti.
+ */
 @Composable
 private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
     val view = LocalView.current
+    val activity = LocalContext.current.trovaActivity()
+    val orizzontale = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    var schermoIntero by remember { mutableStateOf(false) }
+    var visibili by remember { mutableStateOf(true) }
+    var tocchi by remember { mutableIntStateOf(0) }
+    val fuocoRadice = remember { FocusRequester() }
+    val compatti = orizzontale || schermoIntero
+    val tocca = { tocchi++; visibili = true }
+
     DisposableEffect(Unit) {
         view.keepScreenOn = true
         onDispose { view.keepScreenOn = false }
     }
-    Column(Modifier.fillMaxSize().background(Color.Black)) {
-        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            if (s.video) {
-                AndroidView(
-                    factory = { c -> VLCVideoLayout(c).also { Riproduttore.agganciaVideo(it) } },
-                    modifier = Modifier.fillMaxSize(),
-                    onRelease = { Riproduttore.sganciaVideo() },
-                )
+
+    // barre di sistema e orientamento
+    DisposableEffect(schermoIntero, s.video) {
+        if (activity != null) {
+            val ctrl = WindowCompat.getInsetsController(activity.window, view)
+            if (schermoIntero) {
+                ctrl.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                ctrl.hide(WindowInsetsCompat.Type.systemBars())
+                if (s.video) activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             } else {
-                val mod = Modifier.fillMaxHeight(0.85f).aspectRatio(1f)
-                val bmp = s.coverIncorporata
+                ctrl.show(WindowInsetsCompat.Type.systemBars())
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
+        }
+        onDispose {
+            if (activity != null) {
+                WindowCompat.getInsetsController(activity.window, view).show(WindowInsetsCompat.Type.systemBars())
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
+        }
+    }
+
+    // scomparsa automatica dei comandi (solo video in riproduzione)
+    LaunchedEffect(visibili, tocchi, s.inRiproduzione, s.video) {
+        if (visibili && s.video && s.inRiproduzione) {
+            delay(4000)
+            visibili = false
+            try {
+                fuocoRadice.requestFocus()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    BackHandler(enabled = schermoIntero) { schermoIntero = false }
+
+    val comandi: @Composable (Modifier) -> Unit = { mod ->
+        ComandiPlayer(
+            s = s, compatti = compatti, schermoIntero = schermoIntero,
+            onTocco = tocca,
+            onSchermoIntero = { tocca(); schermoIntero = !schermoIntero },
+            onChiudi = onChiudi,
+            modifier = mod,
+        )
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .focusRequester(fuocoRadice)
+            .onPreviewKeyEvent { e ->
+                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                if (!visibili) {
+                    tocca()   // il primo tasto del telecomando mostra solo i comandi
+                    true
+                } else {
+                    tocchi++
+                    false
+                }
+            }
+            .focusable()
+    ) {
+        if (s.video) {
+            AndroidView(
+                factory = { c -> VLCVideoLayout(c).also { Riproduttore.agganciaVideo(it) } },
+                modifier = Modifier.fillMaxSize(),
+                onRelease = { Riproduttore.sganciaVideo() },
+            )
+            // strato trasparente sopra il video: il tocco mostra/nasconde i comandi
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
+                        if (visibili) visibili = false else tocca()
+                    }
+            )
+            if (s.buffering) CircularProgressIndicator(Modifier.align(Alignment.Center))
+            AnimatedVisibility(
+                visible = visibili, enter = fadeIn(), exit = fadeOut(),
+                modifier = Modifier.align(Alignment.BottomCenter),
+            ) {
+                comandi(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))))
+                        .windowInsetsPadding(WindowInsets.safeDrawing)
+                        .padding(top = 24.dp)
+                )
+            }
+        } else {
+            // audio: cover + comandi sempre visibili; in orizzontale affiancati
+            val bmp = s.coverIncorporata
+            val cover: @Composable (Modifier) -> Unit = { mod ->
                 if (bmp != null) {
                     Image(
                         bmp.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop,
@@ -554,37 +697,104 @@ private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
                     Copertina(s.corrente?.cover, segnaposto(s.corrente), mod)
                 }
             }
-            if (s.buffering) CircularProgressIndicator()
+            val contenitore = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)
+            if (orizzontale) {
+                Row(contenitore.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.fillMaxHeight().weight(1f), contentAlignment = Alignment.Center) {
+                        cover(Modifier.fillMaxHeight(0.9f).aspectRatio(1f))
+                        if (s.buffering) CircularProgressIndicator()
+                    }
+                    comandi(Modifier.weight(1.3f))
+                }
+            } else {
+                Column(contenitore) {
+                    Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        cover(Modifier.fillMaxHeight(0.85f).aspectRatio(1f))
+                        if (s.buffering) CircularProgressIndicator()
+                    }
+                    comandi(Modifier.fillMaxWidth().background(Color(0xFF121212)))
+                }
+            }
         }
-        Column(Modifier.fillMaxWidth().background(Color(0xFF121212)).padding(horizontal = 16.dp, vertical = 8.dp)) {
-            Text(s.corrente?.nome ?: "", fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Color.White)
-            val err = s.errore
-            if (err != null) Text(err, color = Color(0xFFEF5350), fontSize = 13.sp)
-            var trascina by remember { mutableStateOf<Float?>(null) }
-            val frac = if (s.durata > 0) (s.posizione.toFloat() / s.durata).coerceIn(0f, 1f) else 0f
+    }
+}
+
+@Composable
+private fun TastoIcona(icona: Int, descrizione: String, dimensione: Dp, pad: PaddingValues, onTocco: () -> Unit, azione: () -> Unit) {
+    TextButton(onClick = { onTocco(); azione() }, contentPadding = pad) {
+        Icon(painterResource(icona), contentDescription = descrizione, tint = Color.White, modifier = Modifier.size(dimensione))
+    }
+}
+
+@Composable
+private fun TastoPlayer(etichetta: String, dimensione: TextUnit, pad: PaddingValues, onTocco: () -> Unit, azione: () -> Unit) {
+    TextButton(onClick = { onTocco(); azione() }, contentPadding = pad) {
+        Text(etichetta, fontSize = dimensione, color = Color.White)
+    }
+}
+
+@Composable
+private fun ComandiPlayer(
+    s: StatoPlayer,
+    compatti: Boolean,
+    schermoIntero: Boolean,
+    onTocco: () -> Unit,
+    onSchermoIntero: () -> Unit,
+    onChiudi: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val testo = if (compatti) 13.sp else 16.sp
+    val iconaPiccola = if (compatti) 22.dp else 28.dp
+    val iconaGrande = if (compatti) 30.dp else 40.dp
+    val pad = if (compatti) PaddingValues(horizontal = 6.dp, vertical = 0.dp) else ButtonDefaults.TextButtonContentPadding
+
+    Column(modifier.padding(horizontal = if (compatti) 12.dp else 16.dp, vertical = if (compatti) 2.dp else 8.dp)) {
+        Text(
+            s.corrente?.nome ?: "", fontSize = if (compatti) 13.sp else 16.sp,
+            maxLines = if (compatti) 1 else 2, overflow = TextOverflow.Ellipsis, color = Color.White,
+        )
+        val err = s.errore
+        if (err != null) Text(err, color = Color(0xFFEF5350), fontSize = 12.sp)
+        var trascina by remember { mutableStateOf<Float?>(null) }
+        val frac = if (s.durata > 0) (s.posizione.toFloat() / s.durata).coerceIn(0f, 1f) else 0f
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(tempo(s.posizione), color = GRIGIO, fontSize = 11.sp)
             Slider(
                 value = trascina ?: frac,
-                onValueChange = { trascina = it },
+                onValueChange = { onTocco(); trascina = it },
                 onValueChangeFinished = {
                     trascina?.let { Riproduttore.vaiA((it * s.durata).toLong()) }
                     trascina = null
                 },
                 enabled = s.durata > 0,
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp).height(if (compatti) 28.dp else 40.dp),
             )
-            Row(Modifier.fillMaxWidth()) {
-                Text(tempo(s.posizione), color = GRIGIO, fontSize = 12.sp)
-                Spacer(Modifier.weight(1f))
-                Text(if (s.durata > 0) tempo(s.durata) else "live", color = GRIGIO, fontSize = 12.sp)
+            Text(if (s.durata > 0) tempo(s.durata) else "live", color = GRIGIO, fontSize = 11.sp)
+        }
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TastoIcona(R.drawable.ic_riduci, "Torna all'elenco", iconaPiccola, pad, onTocco, onChiudi)
+            TastoIcona(R.drawable.ic_precedente, "Precedente", iconaPiccola, pad, onTocco) { Riproduttore.precedente() }
+            TastoPlayer("−10", testo, pad, onTocco) { Riproduttore.salta(-10_000) }
+            TastoIcona(
+                if (s.inRiproduzione) R.drawable.ic_pausa else R.drawable.ic_play,
+                if (s.inRiproduzione) "Pausa" else "Riproduci", iconaGrande, pad, onTocco,
+            ) { Riproduttore.playPausa() }
+            TastoPlayer("+10", testo, pad, onTocco) { Riproduttore.salta(10_000) }
+            TastoIcona(R.drawable.ic_successivo, "Successivo", iconaPiccola, pad, onTocco) { Riproduttore.successivo() }
+            TastoIcona(R.drawable.ic_stop, "Ferma", iconaPiccola, pad, onTocco) { Riproduttore.ferma() }
+            IconButton(onClick = onSchermoIntero, modifier = Modifier.size(if (compatti) 36.dp else 44.dp)) {
+                Icon(
+                    painterResource(if (schermoIntero) R.drawable.ic_esci_schermo_intero else R.drawable.ic_schermo_intero),
+                    contentDescription = if (schermoIntero) "Esci da schermo intero" else "Schermo intero",
+                    tint = Color.White,
+                )
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onChiudi) { Text("▾", fontSize = 22.sp) }
-                TextButton(onClick = { Riproduttore.precedente() }) { Text("⏮", fontSize = 22.sp) }
-                TextButton(onClick = { Riproduttore.salta(-10_000) }) { Text("−10 s") }
-                TextButton(onClick = { Riproduttore.playPausa() }) { Text(if (s.inRiproduzione) "⏸" else "▶", fontSize = 28.sp) }
-                TextButton(onClick = { Riproduttore.salta(10_000) }) { Text("+10 s") }
-                TextButton(onClick = { Riproduttore.successivo() }) { Text("⏭", fontSize = 22.sp) }
-                TextButton(onClick = { Riproduttore.ferma() }) { Text("■", fontSize = 22.sp) }
-            }
+        }
+        if (!compatti) {
             Text(
                 "${s.indice + 1} / ${s.coda.size}", color = GRIGIO, fontSize = 11.sp,
                 modifier = Modifier.align(Alignment.CenterHorizontally),
