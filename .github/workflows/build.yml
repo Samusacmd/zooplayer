@@ -20,7 +20,8 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
+      # Niente android-actions/setup-android: il runner ha già l'SDK Android
+      # e Gradle scarica da solo la piattaforma 35 se manca.
 
       - uses: gradle/actions/setup-gradle@v4
         with:
