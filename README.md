@@ -1,7 +1,16 @@
-# ZooPlayer Android 1.0.0
+# ZooPlayer Android 1.1.1
 
 Porting per Android (telefono, tablet, Android TV, Fire TV) di ZooPlayer 2.8.0 desktop.
 Legge gli stessi JSON generati dal Paste Tool (`name` / `urlList` / `url` / `imageUrl`).
+
+## Changelog
+- **1.1.1** Pulsanti del player disegnati come icone vettoriali: prima erano simboli
+  che alcuni telefoni (es. Xiaomi) mostravano come emoji arancioni di dimensioni diverse.
+- **1.1.0** Schermo intero (barre di sistema nascoste, video ruotato in orizzontale);
+  comandi del video sovrapposti che spariscono dopo 4 s (tocco o tasto del telecomando
+  li fa ricomparire); comandi compatti in orizzontale; audio in orizzontale con cover e
+  comandi affiancati; margini corretti sotto barre e notch (Android 15).
+- **1.0.0** Prima versione Android, porting di ZooPlayer desktop 2.8.0.
 
 ## Versionamento (SemVer)
 La versione è in `app/build.gradle.kts`, riga `val semVer = "1.0.0"`.
