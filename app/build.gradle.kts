@@ -6,7 +6,7 @@ plugins {
 
 // Versione dell'app (Semantic Versioning: MAJOR.MINOR.PATCH).
 // La CI legge questa riga per dare il nome all'APK: ZooPlayer_v<semVer>.apk
-val semVer = "1.4.0"
+val semVer = "1.4.2"
 val numeroBuild = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
 
 android {

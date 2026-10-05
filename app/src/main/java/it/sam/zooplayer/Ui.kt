@@ -10,6 +10,10 @@ import android.content.res.Configuration
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.withFrameMillis
+import kotlin.math.PI
+import kotlin.math.cos
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.graphics.graphicsLayer
@@ -204,18 +208,53 @@ fun App(
     }
 }
 
-/** Splash all'avvio: logo su sfondo scuro, compare, resta un attimo e svanisce (circa 2 s). */
+private const val SPLASH_COMPARSA_MS = 300L
+private const val SPLASH_BATTITO_MS = 800L
+private const val SPLASH_BATTITI = 2
+private const val SPLASH_SCOMPARSA_MS = 300L
+
+/** Interpolazione morbida (inizio e fine rallentati) da a verso b, con t da 0 a 1. */
+private fun morbido(a: Float, b: Float, t: Float): Float {
+    val e = ((1 - cos(PI * t.coerceIn(0f, 1f))) / 2).toFloat()
+    return a + (b - a) * e
+}
+
+/** Battito del cuore: colpo forte, colpo leggero, pausa. ms = tempo dentro il battito. */
+private fun battito(ms: Long): Float {
+    val p = ms % SPLASH_BATTITO_MS
+    return when {
+        p < 120 -> morbido(1f, 1.18f, p / 120f)
+        p < 240 -> morbido(1.18f, 1f, (p - 120) / 120f)
+        p < 360 -> morbido(1f, 1.10f, (p - 240) / 120f)
+        p < 520 -> morbido(1.10f, 1f, (p - 360) / 160f)
+        else -> 1f
+    }
+}
+
+/**
+ * Splash all'avvio: logo che pulsa come un cuore, poi svanisce (circa 2,2 s).
+ * L'animazione è calcolata fotogramma per fotogramma: funziona anche se nel telefono
+ * le animazioni di sistema sono ridotte o disattivate (opzioni sviluppatore / accessibilità).
+ */
 @Composable
 private fun Splash(onFine: () -> Unit) {
-    val opacita = remember { Animatable(0f) }
-    val scala = remember { Animatable(0.85f) }
+    val finePulsazione = SPLASH_COMPARSA_MS + SPLASH_BATTITO_MS * SPLASH_BATTITI
+    val durata = finePulsazione + SPLASH_SCOMPARSA_MS
+    var t by remember { mutableLongStateOf(0L) }
     LaunchedEffect(Unit) {
-        launch { opacita.animateTo(1f, tween(500)) }
-        scala.animateTo(1f, tween(700, easing = FastOutSlowInEasing))
-        delay(900)
-        opacita.animateTo(0f, tween(300))
+        val inizio = withFrameMillis { it }
+        while (t < durata) {
+            t = withFrameMillis { it } - inizio
+        }
         onFine()
     }
+    val opacita = when {
+        t < SPLASH_COMPARSA_MS -> t.toFloat() / SPLASH_COMPARSA_MS
+        t < finePulsazione -> 1f
+        else -> (1f - (t - finePulsazione).toFloat() / SPLASH_SCOMPARSA_MS).coerceIn(0f, 1f)
+    }
+    val scala = if (t in SPLASH_COMPARSA_MS until finePulsazione) battito(t - SPLASH_COMPARSA_MS) else 1f
+
     Box(
         Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
         contentAlignment = Alignment.Center,
@@ -227,9 +266,9 @@ private fun Splash(onFine: () -> Unit) {
                 .fillMaxWidth(0.7f)
                 .widthIn(max = 420.dp)
                 .graphicsLayer {
-                    alpha = opacita.value
-                    scaleX = scala.value
-                    scaleY = scala.value
+                    alpha = opacita
+                    scaleX = scala
+                    scaleY = scala
                 },
         )
     }
