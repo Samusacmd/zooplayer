@@ -36,6 +36,9 @@ data class StatoPlayer(
     val corrente: Voce? get() = coda.getOrNull(indice)
 }
 
+/** Tipo di traccia "video" negli eventi ESAdded di libVLC (0 = audio, 1 = video, 2 = sottotitoli). */
+private const val TRACCIA_VIDEO = 1
+
 /** Unico player dell'app (libVLC). Vive nel processo; PlayerService lo tiene attivo in background. */
 object Riproduttore {
     private lateinit var app: Context
@@ -65,7 +68,11 @@ object Riproduttore {
             MediaPlayer.Event.Playing -> {
                 stato.update { it.copy(inRiproduzione = true, buffering = false, finito = false, errore = null) }
                 stato.value.corrente?.let { Db.segnaAscoltato(it.url) }
+                if ((mp?.videoTracksCount ?: 0) > 0) segnaVideo()
             }
+            // una traccia video comparsa nel flusso: è così che si riconoscono le dirette video
+            MediaPlayer.Event.ESAdded ->
+                if (ev.esChangedType == TRACCIA_VIDEO) segnaVideo()
             MediaPlayer.Event.Paused, MediaPlayer.Event.Stopped ->
                 stato.update { it.copy(inRiproduzione = false) }
             MediaPlayer.Event.Buffering ->
@@ -74,12 +81,9 @@ object Riproduttore {
                 stato.update { it.copy(posizione = ev.timeChanged) }
             MediaPlayer.Event.LengthChanged ->
                 stato.update { it.copy(durata = ev.lengthChanged) }
-            MediaPlayer.Event.Vout -> {
-                val c = stato.value.corrente
-                if (c != null && TipiMedia.tipo(c.url) == TipoMedia.STREAM) {
-                    stato.update { it.copy(video = ev.voutCount > 0) }
-                }
-            }
+            // solo "acceso": chiudendo il player la superficie si stacca e voutCount torna 0,
+            // ma il video c'è ancora
+            MediaPlayer.Event.Vout -> if (ev.voutCount > 0) segnaVideo()
             MediaPlayer.Event.EndReached -> scope.launch {
                 delay(300)
                 successivo(automatico = true)
@@ -207,10 +211,25 @@ object Riproduttore {
         app.stopService(Intent(app, PlayerService::class.java))
     }
 
+    private fun segnaVideo() {
+        val c = stato.value.corrente ?: return
+        if (stato.value.video || TipiMedia.tipo(c.url) == TipoMedia.AUDIO) return
+        ZLog.i("Traccia video rilevata: ${c.nome}")
+        stato.update { it.copy(video = true) }
+    }
+
     fun agganciaVideo(layout: VLCVideoLayout) {
         val p = player()
         if (p.getVLCVout().areViewsAttached()) p.detachViews()
         p.attachViews(layout, null, false, false)
+        // Se il video era già partito senza superficie (dirette, o player riaperto),
+        // VLC non crea l'uscita video da solo: riseleziono la traccia per farla ripartire sullo schermo.
+        val id = p.videoTracks?.firstOrNull { it.id >= 0 }?.id
+        if (id != null) {
+            ZLog.i("Riattivo la traccia video $id sulla superficie")
+            p.setVideoTrack(-1)
+            p.setVideoTrack(id)
+        }
     }
 
     fun sganciaVideo() {
