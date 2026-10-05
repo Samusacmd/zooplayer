@@ -17,7 +17,7 @@ import java.util.concurrent.ConcurrentHashMap
 class NonJsonException(val contentType: String?) : IOException("Non è un elenco JSON ($contentType)")
 
 object Rete {
-    const val UA = "Mozilla/5.0 (Linux; Android) ZooPlayer"
+    const val UA = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
     private const val MAX_BYTE = 6 * 1024 * 1024
     private val memoria = ConcurrentHashMap<String, String>()
     private lateinit var dirCache: File
@@ -52,29 +52,75 @@ object Rete {
         }
     }
 
+    private const val CONSENTITI = "-._~:/?#@!$&'()*+,;="
+
+    /**
+     * Rende sicuro un link per la rete: spazi, lettere accentate, parentesi quadre ecc.
+     * vengono codificati (%20...), le sequenze %XX già presenti restano intatte.
+     * I link di filedn con nomi di cartelle come "Zoo di 105" falliscono senza questo passaggio.
+     */
+    fun codifica(url: String): String {
+        val sb = StringBuilder()
+        var i = 0
+        while (i < url.length) {
+            val cp = url.codePointAt(i)
+            val n = Character.charCount(cp)
+            val c = url[i]
+            when {
+                c == '%' && i + 2 < url.length &&
+                    url[i + 1].isHexDigitAscii() && url[i + 2].isHexDigitAscii() -> sb.append(c)
+                cp < 128 && (c in 'a'..'z' || c in 'A'..'Z' || c in '0'..'9' || c in CONSENTITI) -> sb.append(c)
+                else -> url.substring(i, i + n).toByteArray(Charsets.UTF_8)
+                    .forEach { b -> sb.append('%').append("%02X".format(b.toInt() and 0xFF)) }
+            }
+            i += n
+        }
+        return sb.toString()
+    }
+
+    private fun Char.isHexDigitAscii() = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+
     suspend fun scarica(ctx: Context, url: String): String = withContext(Dispatchers.IO) {
         if (url.startsWith("content://") || url.startsWith("file://")) {
             val ins = ctx.contentResolver.openInputStream(Uri.parse(url))
                 ?: throw IOException("File locale non leggibile")
-            ins.use { leggi(it) ?: throw IOException("File troppo grande") }
-        } else {
-            val c = URL(url).openConnection() as HttpURLConnection
+            return@withContext ins.use { leggi(it) ?: throw IOException("File troppo grande") }
+        }
+        var indirizzo = codifica(url)
+        var salti = 0
+        while (true) {
+            val c = URL(indirizzo).openConnection() as HttpURLConnection
             try {
                 c.connectTimeout = 15_000
                 c.readTimeout = 30_000
-                c.instanceFollowRedirects = true
+                // i redirect li seguo a mano: HttpURLConnection non passa da http a https da solo
+                c.instanceFollowRedirects = false
                 c.setRequestProperty("User-Agent", UA)
+                c.setRequestProperty("Accept", "application/json,text/plain,text/html;q=0.9,*/*;q=0.8")
                 val codice = c.responseCode
-                if (codice >= 400) throw IOException("HTTP $codice")
+                if (codice in 300..399) {
+                    val dove = c.getHeaderField("Location")
+                    if (dove == null || ++salti > 6) throw IOException("Redirect non valido (HTTP $codice)")
+                    val prossimo = codifica(URL(URL(indirizzo), dove).toString())
+                    ZLog.i("Redirect $codice: $indirizzo -> $prossimo")
+                    indirizzo = prossimo
+                    continue
+                }
+                if (codice >= 400) {
+                    ZLog.w("HTTP $codice da $indirizzo")
+                    throw IOException("Il server ha risposto HTTP $codice")
+                }
                 val ct = c.contentType?.lowercase()
                 if (ct != null && (ct.startsWith("audio/") || ct.startsWith("video/") || ct.contains("mpegurl"))) {
                     throw NonJsonException(ct)
                 }
-                c.inputStream.use { leggi(it) ?: throw NonJsonException(ct) }
+                return@withContext c.inputStream.use { leggi(it) ?: throw NonJsonException(ct) }
             } finally {
                 c.disconnect()
             }
         }
+        @Suppress("UNREACHABLE_CODE")
+        throw IOException("irraggiungibile")
     }
 
     /** Legge al massimo MAX_BYTE: un flusso radio infinito ritorna null invece di bloccarsi. */
@@ -104,7 +150,10 @@ object Repo {
         }
         val testo = Rete.scarica(ctx, url)
         val arr = withContext(Dispatchers.Default) { Parser.estraiArray(testo) }
-            ?: throw IOException("Nessun elenco JSON trovato")
+        if (arr == null) {
+            ZLog.w("Nessun JSON in $url - inizio risposta: ${testo.take(300).replace(Regex("\\s+"), " ")}")
+            throw IOException("Il link non contiene un elenco JSON (dettagli nel log)")
+        }
         Rete.inCache(url, testo)
         return Parser.normalizza(arr, url, coverPadre)
     }

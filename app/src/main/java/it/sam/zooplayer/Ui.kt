@@ -8,6 +8,12 @@ import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.graphics.graphicsLayer
+import kotlinx.coroutines.launch
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.focusable
@@ -191,6 +197,53 @@ fun App(
     onEsci: () -> Unit,
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
+    if (ui.splash) {
+        Splash(onFine = vm::fineSplash)
+    } else {
+        AppPrincipale(vm, onApriFile, onCondividiLog, puoScaricare, onEsci)
+    }
+}
+
+/** Splash all'avvio: logo su sfondo scuro, compare, resta un attimo e svanisce (circa 2 s). */
+@Composable
+private fun Splash(onFine: () -> Unit) {
+    val opacita = remember { Animatable(0f) }
+    val scala = remember { Animatable(0.85f) }
+    LaunchedEffect(Unit) {
+        launch { opacita.animateTo(1f, tween(500)) }
+        scala.animateTo(1f, tween(700, easing = FastOutSlowInEasing))
+        delay(900)
+        opacita.animateTo(0f, tween(300))
+        onFine()
+    }
+    Box(
+        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.Center,
+    ) {
+        Image(
+            painter = painterResource(R.drawable.logo_zoo),
+            contentDescription = "Lo Zoo di 105",
+            modifier = Modifier
+                .fillMaxWidth(0.7f)
+                .widthIn(max = 420.dp)
+                .graphicsLayer {
+                    alpha = opacita.value
+                    scaleX = scala.value
+                    scaleY = scala.value
+                },
+        )
+    }
+}
+
+@Composable
+private fun AppPrincipale(
+    vm: MainViewModel,
+    onApriFile: () -> Unit,
+    onCondividiLog: () -> Unit,
+    puoScaricare: () -> Boolean,
+    onEsci: () -> Unit,
+) {
+    val ui by vm.ui.collectAsStateWithLifecycle()
     val player by Riproduttore.stato.collectAsStateWithLifecycle()
     val preferiti by Db.preferiti.collectAsStateWithLifecycle()
     val ascoltati by Db.ascoltati.collectAsStateWithLifecycle()
@@ -208,7 +261,7 @@ fun App(
         }
     }
 
-    val scarica: (Voce) -> Unit = { v -> if (puoScaricare()) vm.scarica(v) }
+    val scarica: ((Voce) -> Unit)? = if (ui.download) ({ v: Voce -> if (puoScaricare()) vm.scarica(v) }) else null
     val correnteUrl = player.corrente?.url
 
     if (ui.schermoPlayer && player.corrente != null) {
@@ -299,7 +352,13 @@ private fun Barra(
 
     TopAppBar(
         title = {
-            Column {
+            // il titolo è anche il punto della combinazione segreta che sblocca i download
+            Column(
+                Modifier.clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) { vm.toccoTitolo() }
+            ) {
                 Text(titolo, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (percorso != null) {
                     Text(percorso, fontSize = 11.sp, color = GRIGIO, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -336,7 +395,9 @@ private fun Barra(
                         VoceMenu("Torna all'inizio") { menu = false; vm.tornaAllaRadice() }
                         VoceMenu("Aggiorna elenco") { menu = false; vm.aggiorna() }
                         VoceMenu("Aggiorna indice ricerca") { menu = false; vm.aggiornaIndice() }
-                        VoceMenu("Scarica tutto questo elenco") { menu = false; if (puoScaricare()) vm.preparaScaricaTutto() }
+                        if (ui.download) {
+                            VoceMenu("Scarica tutto questo elenco") { menu = false; if (puoScaricare()) vm.preparaScaricaTutto() }
+                        }
                     }
                     HorizontalDivider()
                     VoceMenu("Condividi log") { menu = false; onCondividiLog() }
@@ -388,7 +449,7 @@ private fun VistaVoci(
     ascoltati: Set<String>,
     correnteUrl: String?,
     vm: MainViewModel,
-    onScarica: (Voce) -> Unit,
+    onScarica: ((Voce) -> Unit)?,
     vuoto: String,
 ) {
     if (voci.isEmpty()) {
@@ -429,7 +490,7 @@ private fun VistaVoci(
                     preferito = v.url in preferiti, ascoltato = v.url in ascoltati, corrente = v.url == correnteUrl,
                     onClick = { vm.clicca(v, voci) },
                     onPreferito = { vm.togglePreferito(v) },
-                    onScarica = { onScarica(v) },
+                    onScarica = onScarica?.let { f -> { f(v) } },
                 )
             }
         }
@@ -445,7 +506,7 @@ private fun RigaVoce(
     corrente: Boolean,
     onClick: () -> Unit,
     onPreferito: () -> Unit,
-    onScarica: () -> Unit,
+    onScarica: (() -> Unit)?,
     sotto: String? = null,
 ) {
     Row(
@@ -476,7 +537,7 @@ private fun RigaVoce(
         IconButton(onClick = onPreferito) {
             Text(if (preferito) "★" else "☆", color = GIALLO, fontSize = 20.sp)
         }
-        if (!v.isElenco) {
+        if (!v.isElenco && onScarica != null) {
             IconButton(onClick = onScarica) { Text("⬇", fontSize = 18.sp) }
         }
     }
@@ -520,7 +581,7 @@ private fun VistaRicerca(
                     preferito = r.url in preferiti, ascoltato = r.url in ascoltati, corrente = r.url == correnteUrl,
                     onClick = { vm.riproduciRisultato(r) },
                     onPreferito = { vm.togglePreferito(v) },
-                    onScarica = { if (puoScaricare()) vm.scaricaRiga(r) },
+                    onScarica = if (ui.download) ({ if (puoScaricare()) vm.scaricaRiga(r) }) else null,
                     sotto = r.percorso.ifBlank { sottotitolo(v) },
                 )
             }

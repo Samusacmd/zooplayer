@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+: lo splash di sistema resta vuoto (solo sfondo scuro),
+         così compare solo lo splash dell'app con il logo -->
+    <style name="Theme.Zoo" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/sfondo</item>
+        <item name="android:statusBarColor">@color/sfondo</item>
+        <item name="android:navigationBarColor">@color/sfondo</item>
+        <item name="android:windowSplashScreenBackground">@color/sfondo</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/vuoto</item>
+    </style>
+</resources>

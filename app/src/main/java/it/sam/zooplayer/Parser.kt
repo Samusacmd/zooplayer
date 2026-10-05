@@ -13,7 +13,9 @@ object Parser {
     private val SPAZI = Regex("""\s+""")
 
     fun normalizzaUrlJson(u: String): String {
-        val s = u.trim()
+        var s = u.trim()
+        // "pastebin.com/raw/abc" scritto senza https:// non è un indirizzo valido
+        if (s.isNotEmpty() && !s.contains("://")) s = "https://$s"
         val m = PASTEBIN.find(s) ?: return s
         return "https://pastebin.com/raw/" + m.groupValues[3]
     }

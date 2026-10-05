@@ -106,7 +106,7 @@ object Riproduttore {
         val v = stato.value.corrente ?: return
         val p = player()
         ZLog.i("Riproduco: ${v.nome} -> ${v.url}")
-        val m = Media(libVlc!!, Uri.parse(v.url))
+        val m = Media(libVlc!!, Uri.parse(Rete.codifica(v.url)))
         m.setHWDecoderEnabled(true, false)
         m.addOption(":network-caching=3000")
         p.setMedia(m)
@@ -129,7 +129,7 @@ object Riproduttore {
             val bmp = withContext(Dispatchers.IO) {
                 val r = MediaMetadataRetriever()
                 try {
-                    r.setDataSource(v.url, HashMap<String, String>())
+                    r.setDataSource(Rete.codifica(v.url), hashMapOf("User-Agent" to Rete.UA))
                     r.embeddedPicture?.let { decodifica(it) }
                 } catch (e: Exception) {
                     ZLog.w("Cover incorporata non letta (${v.nome}): ${e.message}")

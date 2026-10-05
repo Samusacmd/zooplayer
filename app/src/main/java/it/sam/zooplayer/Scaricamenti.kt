@@ -16,7 +16,7 @@ object Scaricamenti {
         val sotto = cartella.split(" / ").filter { it.isNotBlank() }.joinToString("/") { pulisci(it) }
         val rel = if (sotto.isEmpty()) "ZooPlayer/$nomeFile" else "ZooPlayer/$sotto/$nomeFile"
         try {
-            val req = DownloadManager.Request(Uri.parse(url))
+            val req = DownloadManager.Request(Uri.parse(Rete.codifica(url)))
                 .setTitle(nome)
                 .setDescription("ZooPlayer")
                 .addRequestHeader("User-Agent", Rete.UA)
