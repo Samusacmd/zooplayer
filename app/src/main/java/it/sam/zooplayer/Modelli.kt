@@ -44,6 +44,9 @@ object TipiMedia {
         else -> TipoMedia.STREAM
     }
 
+    /** Dirette in streaming adattivo (DASH .mpd, HLS .m3u8): si riproducono, non si scaricano. */
+    fun isDiretta(url: String): Boolean = estensione(url) in setOf("mpd", "m3u8")
+
     /** Un campo "url" che in realtà punta a un altro elenco JSON. */
     fun sembraElenco(url: String): Boolean =
         estensione(url) in ELENCHI || PASTEBIN.containsMatchIn(url) || url.contains("/raw?id=")

@@ -124,7 +124,7 @@ object Riproduttore {
     /** Cover incorporata nel file audio (tag ID3/MP4/FLAC); se manca resta quella dell'elenco. */
     private fun caricaCover(v: Voce) {
         jobCover?.cancel()
-        if (TipiMedia.tipo(v.url) == TipoMedia.VIDEO) return
+        if (TipiMedia.tipo(v.url) == TipoMedia.VIDEO || TipiMedia.isDiretta(v.url)) return
         jobCover = scope.launch {
             val bmp = withContext(Dispatchers.IO) {
                 val r = MediaMetadataRetriever()

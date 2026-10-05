@@ -153,6 +153,7 @@ private fun Modifier.evidenziaFocus(): Modifier = composed {
 private fun segnaposto(v: Voce?): String = when {
     v == null -> "🎵"
     v.isElenco -> "📁"
+    TipiMedia.isDiretta(v.url) -> "📺"
     else -> when (TipiMedia.tipo(v.url)) {
         TipoMedia.VIDEO -> "🎬"
         TipoMedia.AUDIO -> "🎵"
@@ -162,6 +163,7 @@ private fun segnaposto(v: Voce?): String = when {
 
 private fun sottotitolo(v: Voce): String = when {
     v.isElenco -> "Elenco"
+    TipiMedia.isDiretta(v.url) -> "Diretta"
     TipiMedia.estensione(v.url).isNotEmpty() -> TipiMedia.estensione(v.url).uppercase()
     else -> "Stream"
 }
@@ -302,6 +304,11 @@ private fun AppPrincipale(
 
     val scarica: ((Voce) -> Unit)? = if (ui.download) ({ v: Voce -> if (puoScaricare()) vm.scarica(v) }) else null
     val correnteUrl = player.corrente?.url
+
+    // una diretta (o uno stream) che si rivela video apre da sola il player per mostrarlo
+    LaunchedEffect(player.video, correnteUrl) {
+        if (player.video && correnteUrl != null) vm.apriPlayer()
+    }
 
     if (ui.schermoPlayer && player.corrente != null) {
         SchermoPlayer(player, onChiudi = vm::chiudiPlayer)
@@ -576,7 +583,7 @@ private fun RigaVoce(
         IconButton(onClick = onPreferito) {
             Text(if (preferito) "★" else "☆", color = GIALLO, fontSize = 20.sp)
         }
-        if (!v.isElenco && onScarica != null) {
+        if (!v.isElenco && onScarica != null && !TipiMedia.isDiretta(v.url)) {
             IconButton(onClick = onScarica) { Text("⬇", fontSize = 18.sp) }
         }
     }

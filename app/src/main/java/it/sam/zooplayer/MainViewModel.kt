@@ -338,6 +338,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             ui.update { it.copy(caricamento = true) }
             try {
                 val righe = Esploratore.raccogli(ctx, liv.url, liv.titolo, liv.cover, false) { _, _ -> }
+                    .filter { !TipiMedia.isDiretta(it.url) } // le dirette non sono file da scaricare
                 ui.update { it.copy(caricamento = false, confermaDownload = ConfermaDownload(liv.titolo, righe)) }
             } catch (e: CancellationException) {
                 throw e
