@@ -76,6 +76,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Uscita dall'app col tasto Indietro dalla home: il player si chiude. */
+    override fun onDestroy() {
+        if (isFinishing && !isChangingConfigurations && Riproduttore.stato.value.corrente != null) {
+            ZLog.i("App chiusa: fermo la riproduzione")
+            Riproduttore.ferma()
+        }
+        super.onDestroy()
+    }
+
     /** Tasti multimediali del telecomando (Fire TV / Android TV) e delle cuffie. */
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (Riproduttore.stato.value.corrente == null) return super.onKeyDown(keyCode, event)

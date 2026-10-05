@@ -67,7 +67,10 @@ class PlayerService : Service() {
             A_TOGGLE -> Riproduttore.playPausa()
             A_INDIETRO -> Riproduttore.salta(-10_000)
             A_AVANTI -> Riproduttore.salta(10_000)
-            A_STOP -> Riproduttore.ferma()
+            A_STOP -> {
+                ZLog.i("Stop dalla notifica")
+                Riproduttore.ferma()
+            }
         }
         return START_NOT_STICKY
     }
@@ -101,7 +104,17 @@ class PlayerService : Service() {
             .addAction(0, if (s.inRiproduzione) "Pausa" else "Play", azione(A_TOGGLE, 2))
             .addAction(0, "+10 s", azione(A_AVANTI, 3))
             .addAction(0, "Stop", azione(A_STOP, 4))
+            // Android 14+: se la notifica viene scartata con uno swipe, si ferma anche il player
+            .setDeleteIntent(azione(A_STOP, 5))
             .build()
+    }
+
+    /** L'app è stata chiusa dalle app recenti: il player si chiude con lei. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        ZLog.i("App chiusa dalle recenti: fermo la riproduzione")
+        Riproduttore.ferma()
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
