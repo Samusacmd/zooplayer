@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
@@ -12,6 +13,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.media.app.NotificationCompat.MediaStyle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -29,6 +31,18 @@ class PlayerService : Service() {
         private const val A_INDIETRO = "it.sam.zooplayer.INDIETRO"
         private const val A_AVANTI = "it.sam.zooplayer.AVANTI"
         private const val A_STOP = "it.sam.zooplayer.STOP"
+        private const val A_AGGIORNA = "it.sam.zooplayer.AGGIORNA"
+
+        /** Ridisegna la notifica (es. copertina arrivata), solo se il servizio è attivo. */
+        fun aggiornaNotifica(ctx: Context) {
+            if (Riproduttore.stato.value.corrente == null) return
+            val nm = ctx.getSystemService(NotificationManager::class.java)
+            if (nm.activeNotifications.none { it.id == ID }) return
+            try {
+                ctx.startService(Intent(ctx, PlayerService::class.java).setAction(A_AGGIORNA))
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -50,7 +64,7 @@ class PlayerService : Service() {
             .apply { setReferenceCounted(false); acquire() }
         scope.launch {
             Riproduttore.stato
-                .map { Triple(it.corrente?.nome, it.inRiproduzione, it.errore) }
+                .map { listOf(it.corrente?.nome, it.inRiproduzione, it.errore, it.coverIncorporata) }
                 .distinctUntilChanged()
                 .collect {
                     if (Riproduttore.stato.value.corrente != null) {
@@ -67,6 +81,8 @@ class PlayerService : Service() {
             A_TOGGLE -> Riproduttore.playPausa()
             A_INDIETRO -> Riproduttore.salta(-10_000)
             A_AVANTI -> Riproduttore.salta(10_000)
+            A_AGGIORNA -> getSystemService(NotificationManager::class.java)
+                .notify(ID, notifica(Riproduttore.stato.value))
             A_STOP -> {
                 ZLog.i("Stop dalla notifica")
                 Riproduttore.ferma()
@@ -100,10 +116,21 @@ class PlayerService : Service() {
             .setOnlyAlertOnce(true)
             .setSilent(true)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .addAction(0, "−10 s", azione(A_INDIETRO, 1))
-            .addAction(0, if (s.inRiproduzione) "Pausa" else "Play", azione(A_TOGGLE, 2))
-            .addAction(0, "+10 s", azione(A_AVANTI, 3))
-            .addAction(0, "Stop", azione(A_STOP, 4))
+            .setLargeIcon(Riproduttore.copertinaSessione)
+            .addAction(R.drawable.ic_riavvolgi, "−10 s", azione(A_INDIETRO, 1))
+            .addAction(
+                if (s.inRiproduzione) R.drawable.ic_pausa else R.drawable.ic_play,
+                if (s.inRiproduzione) "Pausa" else "Play",
+                azione(A_TOGGLE, 2),
+            )
+            .addAction(R.drawable.ic_avanza, "+10 s", azione(A_AVANTI, 3))
+            .addAction(R.drawable.ic_stop, "Stop", azione(A_STOP, 4))
+            // notifica "multimediale": comandi su schermata di blocco, collegata alla sessione
+            .setStyle(
+                MediaStyle()
+                    .setMediaSession(Riproduttore.sessione.sessionToken)
+                    .setShowActionsInCompactView(0, 1, 2)
+            )
             // Android 14+: se la notifica viene scartata con uno swipe, si ferma anche il player
             .setDeleteIntent(azione(A_STOP, 5))
             .build()

@@ -1,9 +1,14 @@
-# ZooPlayer Android 1.1.1
+# ZooPlayer Android 1.6.0
 
 Porting per Android (telefono, tablet, Android TV, Fire TV) di ZooPlayer 2.8.0 desktop.
 Legge gli stessi JSON generati dal Paste Tool (`name` / `urlList` / `url` / `imageUrl`).
 
 ## Changelog
+- **1.6.0** Tasti Bluetooth/cuffie funzionanti anche in background e a schermo spento;
+  titolo e copertina su schermata di blocco, auto e smartwatch (sessione multimediale).
+  Chiamate, sveglie e altre app: pausa e ripresa automatica a fine interruzione; notifiche
+  brevi abbassano solo il volume. Cuffie scollegate: pausa. Durante una chiamata il
+  player non parte.
 - **1.1.1** Pulsanti del player disegnati come icone vettoriali: prima erano simboli
   che alcuni telefoni (es. Xiaomi) mostravano come emoji arancioni di dimensioni diverse.
 - **1.1.0** Schermo intero (barre di sistema nascoste, video ruotato in orizzontale);
@@ -13,7 +18,7 @@ Legge gli stessi JSON generati dal Paste Tool (`name` / `urlList` / `url` / `ima
 - **1.0.0** Prima versione Android, porting di ZooPlayer desktop 2.8.0.
 
 ## Versionamento (SemVer)
-La versione è in `app/build.gradle.kts`, riga `val semVer = "1.0.0"`.
+La versione è in `app/build.gradle.kts`, riga `val semVer = "1.6.0"`.
 - `versionName` = semVer
 - `versionCode` = numero di esecuzione di GitHub Actions (`GITHUB_RUN_NUMBER`)
 - l'APK esce come `ZooPlayer_v<semVer>.apk`

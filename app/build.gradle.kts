@@ -6,7 +6,7 @@ plugins {
 
 // Versione dell'app (Semantic Versioning: MAJOR.MINOR.PATCH).
 // La CI legge questa riga per dare il nome all'APK: ZooPlayer_v<semVer>.apk
-val semVer = "1.5.1"
+val semVer = "1.6.0"
 val numeroBuild = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
 
 android {
@@ -76,6 +76,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.core:core-ktx:1.15.0")
+    // sessione multimediale (tasti Bluetooth, schermata di blocco) e focus audio (chiamate)
+    implementation("androidx.media:media:1.7.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
     // Motore VLC: legge anche WMA e FLV, che ExoPlayer non supporta
