@@ -285,7 +285,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     ui.update { it.copy(indicizzazione = "Indicizzazione: $e elenchi, $f file") }
                 }
                 withContext(Dispatchers.IO) { Db.salvaIndice(radice.url, righe) }
-                ui.update { it.copy(indicizzazione = null, messaggio = "Indice aggiornato: ${righe.size} file") }
+                val persi = Esploratore.nonLetti
+                val msg = if (persi == 0) "Indice aggiornato: ${righe.size} file"
+                else "Indice aggiornato: ${righe.size} file. $persi elenchi non letti: riprova \"Aggiorna indice\" tra qualche minuto"
+                ui.update { it.copy(indicizzazione = null, messaggio = msg) }
             } catch (e: CancellationException) {
                 ui.update { it.copy(indicizzazione = null) }
                 throw e

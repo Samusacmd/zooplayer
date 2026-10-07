@@ -1,9 +1,10 @@
-# ZooPlayer Android 1.6.2
+# ZooPlayer Android 1.6.3
 
 Porting per Android (telefono, tablet, Android TV, Fire TV) di ZooPlayer 2.8.0 desktop.
 Legge gli stessi JSON generati dal Paste Tool (`name` / `urlList` / `url` / `imageUrl`).
 
 ## Changelog
+- **1.6.3** Pastebin e HTTP 429: richieste distanziate (1,2 s), dopo un 429 pausa e nuovo tentativo (5/15/30/60 s o Retry-After), se l'aggiornamento fallisce si usa la copia salvata; l'indice segnala gli elenchi non letti.
 - **1.6.2** Video: la rotazione segue il sensore anche con la rotazione automatica del telefono disattivata; il pulsante schermo intero blocca in orizzontale. Niente più scatto dello schermo cambiando modalità.
 - **1.6.1** Dirette video al primo avvio dell'app: schermo nero con solo audio. La traccia video ora viene riattivata quando la superficie è davvero pronta, con controllo di sicurezza fino a 4 tentativi.
 - **1.6.0** Tasti Bluetooth/cuffie funzionanti anche in background e a schermo spento;
@@ -20,7 +21,7 @@ Legge gli stessi JSON generati dal Paste Tool (`name` / `urlList` / `url` / `ima
 - **1.0.0** Prima versione Android, porting di ZooPlayer desktop 2.8.0.
 
 ## Versionamento (SemVer)
-La versione è in `app/build.gradle.kts`, riga `val semVer = "1.6.2"`.
+La versione è in `app/build.gradle.kts`, riga `val semVer = "1.6.3"`.
 - `versionName` = semVer
 - `versionCode` = numero di esecuzione di GitHub Actions (`GITHUB_RUN_NUMBER`)
 - l'APK esce come `ZooPlayer_v<semVer>.apk`

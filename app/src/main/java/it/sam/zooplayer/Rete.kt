@@ -2,7 +2,11 @@ package it.sam.zooplayer
 
 import android.content.Context
 import android.net.Uri
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -13,12 +17,56 @@ import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
+/** Il server ha risposto "troppe richieste" (HTTP 429) anche dopo i tentativi. */
+class TroppeRichiesteException(host: String) : IOException("$host ha limitato le richieste (HTTP 429): riprova tra qualche minuto")
+
+/**
+ * Freno per gli host che limitano le richieste (pastebin: HTTP 429 se si va troppo veloci).
+ * Le richieste verso lo stesso host partono distanziate; dopo un 429 tutte quelle verso
+ * quell'host si fermano per il tempo indicato dal server.
+ */
+private object Freno {
+    private class Stato {
+        val lock = Mutex()
+        var ultima = 0L
+        var pausaFino = 0L
+    }
+
+    private val stati = ConcurrentHashMap<String, Stato>()
+
+    /** Distanza minima tra due richieste allo stesso host. */
+    fun intervallo(host: String): Long = when {
+        host.endsWith("pastebin.com") -> 1_200L
+        else -> 0L
+    }
+
+    suspend fun attendiTurno(host: String) {
+        val minimo = intervallo(host)
+        val st = stati.getOrPut(host) { Stato() }
+        if (minimo == 0L && st.pausaFino == 0L) return
+        st.lock.withLock {
+            val ora = System.currentTimeMillis()
+            val attesa = maxOf(st.ultima + minimo - ora, st.pausaFino - ora)
+            if (attesa > 0) delay(attesa)
+            st.ultima = System.currentTimeMillis()
+        }
+    }
+
+    fun pausa(host: String, ms: Long) {
+        val st = stati.getOrPut(host) { Stato() }
+        st.pausaFino = maxOf(st.pausaFino, System.currentTimeMillis() + ms)
+    }
+}
+
 /** Il link non è un elenco JSON ma un flusso audio/video (es. una radio come R101). */
 class NonJsonException(val contentType: String?) : IOException("Non è un elenco JSON ($contentType)")
 
 object Rete {
     const val UA = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
     private const val MAX_BYTE = 6 * 1024 * 1024
+
+    /** Attese dopo un HTTP 429 (ms), una per tentativo. */
+    private val ATTESE_429 = longArrayOf(5_000, 15_000, 30_000, 60_000)
     private val memoria = ConcurrentHashMap<String, String>()
     private lateinit var dirCache: File
 
@@ -88,7 +136,10 @@ object Rete {
         }
         var indirizzo = codifica(url)
         var salti = 0
+        var tentativi429 = 0
         while (true) {
+            val host = URL(indirizzo).host.lowercase()
+            Freno.attendiTurno(host)
             val c = URL(indirizzo).openConnection() as HttpURLConnection
             try {
                 c.connectTimeout = 15_000
@@ -104,6 +155,18 @@ object Rete {
                     val prossimo = codifica(URL(URL(indirizzo), dove).toString())
                     ZLog.i("Redirect $codice: $indirizzo -> $prossimo")
                     indirizzo = prossimo
+                    continue
+                }
+                if (codice == 429 || (codice == 503 && host.endsWith("pastebin.com"))) {
+                    if (++tentativi429 > ATTESE_429.size) {
+                        ZLog.w("HTTP $codice da $indirizzo: rinuncio dopo ${ATTESE_429.size} attese")
+                        throw TroppeRichiesteException(host)
+                    }
+                    // Retry-After in secondi se il server lo indica, altrimenti attese crescenti
+                    val suggerito = c.getHeaderField("Retry-After")?.trim()?.toLongOrNull()?.times(1000)
+                    val attesa = (suggerito ?: ATTESE_429[tentativi429 - 1]).coerceIn(2_000, 120_000)
+                    ZLog.w("HTTP $codice da $host: pausa di ${attesa / 1000} s e riprovo (tentativo $tentativi429)")
+                    Freno.pausa(host, attesa)
                     continue
                 }
                 if (codice >= 400) {
@@ -148,7 +211,22 @@ object Repo {
                 if (arr != null) return Parser.normalizza(arr, url, coverPadre)
             }
         }
-        val testo = Rete.scarica(ctx, url)
+        val testo = try {
+            Rete.scarica(ctx, url)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: NonJsonException) {
+            throw e
+        } catch (e: Exception) {
+            // aggiornamento fallito (es. 429): meglio la copia salvata che un elenco mancante
+            val vecchio = if (forza) Rete.daCache(url) else null
+            val arrVecchio = vecchio?.let { withContext(Dispatchers.Default) { Parser.estraiArray(it) } }
+            if (arrVecchio != null) {
+                ZLog.w("Aggiornamento di $url fallito (${e.message}): uso la copia salvata")
+                return Parser.normalizza(arrVecchio, url, coverPadre)
+            }
+            throw e
+        }
         val arr = withContext(Dispatchers.Default) { Parser.estraiArray(testo) }
         if (arr == null) {
             ZLog.w("Nessun JSON in $url - inizio risposta: ${testo.take(300).replace(Regex("\\s+"), " ")}")

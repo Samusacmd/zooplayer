@@ -13,6 +13,11 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /** Visita ricorsiva di tutti i sotto-elenchi: serve all'indice di ricerca e a "Scarica tutto". */
 object Esploratore {
+    /** Elenchi che l'ultima esplorazione non è riuscita a leggere (es. pastebin ha limitato). */
+    @Volatile
+    var nonLetti = 0
+        private set
+
     suspend fun raccogli(
         ctx: Context,
         radiceUrl: String,
@@ -25,6 +30,7 @@ object Esploratore {
         val out = Collections.synchronizedList(ArrayList<RigaIndice>())
         val sem = Semaphore(6)
         val elenchi = AtomicInteger()
+        val falliti = AtomicInteger()
 
         suspend fun visita(url: String, nome: String, percorso: String, cover: String?) {
             if (!visti.add(url)) return
@@ -37,6 +43,7 @@ object Esploratore {
                 return
             } catch (e: Exception) {
                 ZLog.w("Elenco non letto [$percorso] $url: ${e.message}")
+                falliti.incrementAndGet()
                 return
             }
             voci.filter { !it.isElenco }.forEach { out += RigaIndice(it.nome, it.url, percorso, it.cover) }
@@ -48,7 +55,8 @@ object Esploratore {
         }
 
         visita(radiceUrl, radiceNome, "", coverRadice)
-        ZLog.i("Esplorazione di '$radiceNome' completata: ${elenchi.get()} elenchi, ${out.size} file")
+        nonLetti = falliti.get()
+        ZLog.i("Esplorazione di '$radiceNome' completata: ${elenchi.get()} elenchi, ${out.size} file, ${falliti.get()} elenchi non letti")
         synchronized(out) { out.toList() }
     }
 }
