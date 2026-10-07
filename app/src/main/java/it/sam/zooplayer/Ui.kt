@@ -716,8 +716,11 @@ private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
         onDispose { view.keepScreenOn = false }
     }
 
-    // barre di sistema e orientamento
-    DisposableEffect(immersivo, bloccato, s.video) {
+    // barre di sistema e orientamento.
+    // Video: SCREEN_ORIENTATION_SENSOR segue il sensore anche se la rotazione automatica
+    // del telefono è disattivata (con UNSPECIFIED il video restava sempre in verticale).
+    // Pulsante schermo intero: blocca in orizzontale. Audio ed elenchi: impostazione del telefono.
+    LaunchedEffect(immersivo, bloccato, s.video) {
         if (activity != null) {
             val ctrl = WindowCompat.getInsetsController(activity.window, view)
             if (immersivo) {
@@ -726,10 +729,16 @@ private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
             } else {
                 ctrl.show(WindowInsetsCompat.Type.systemBars())
             }
-            activity.requestedOrientation =
-                if (bloccato && s.video) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            val voluto = when {
+                s.video && bloccato -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                s.video -> ActivityInfo.SCREEN_ORIENTATION_SENSOR
+                else -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
+            if (activity.requestedOrientation != voluto) activity.requestedOrientation = voluto
         }
+    }
+    // ripristino solo quando si esce dal player: farlo a ogni cambio faceva "scattare" lo schermo
+    DisposableEffect(Unit) {
         onDispose {
             if (activity != null) {
                 WindowCompat.getInsetsController(activity.window, view).show(WindowInsetsCompat.Type.systemBars())
