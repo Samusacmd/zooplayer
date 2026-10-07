@@ -34,6 +34,7 @@ import kotlinx.coroutines.withContext
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
+import org.videolan.libvlc.interfaces.IVLCVout
 import org.videolan.libvlc.util.VLCVideoLayout
 
 data class StatoPlayer(
@@ -78,6 +79,10 @@ object Riproduttore {
     private var abbassato = false
     private var jobArt: Job? = null
     private var urlArt: String? = null
+
+    /** Uscite video attive secondo VLC: 0 con una traccia video = schermo nero. */
+    private var voutAttive = 0
+    private var jobVideo: Job? = null
 
     fun init(ctx: Context) {
         app = ctx.applicationContext
@@ -287,6 +292,15 @@ object Riproduttore {
         val lib = LibVLC(app, arrayListOf("--network-caching=3000", "--http-reconnect", "--no-stats"))
         val p = MediaPlayer(lib)
         p.setEventListener { ev -> evento(ev) }
+        // la superficie video è pronta solo quando Android l'ha creata, non quando la si aggancia
+        p.getVLCVout().addCallback(object : IVLCVout.Callback {
+            override fun onSurfacesCreated(vlcVout: IVLCVout) {
+                ZLog.i("Superficie video pronta")
+                controllaVideo(ritardoMs = 150)
+            }
+
+            override fun onSurfacesDestroyed(vlcVout: IVLCVout) {}
+        })
         libVlc = lib
         mp = p
         ZLog.i("libVLC inizializzato")
@@ -313,7 +327,10 @@ object Riproduttore {
                 stato.update { it.copy(durata = ev.lengthChanged) }
             // solo "acceso": chiudendo il player la superficie si stacca e voutCount torna 0,
             // ma il video c'è ancora
-            MediaPlayer.Event.Vout -> if (ev.voutCount > 0) segnaVideo()
+            MediaPlayer.Event.Vout -> {
+                voutAttive = ev.voutCount
+                if (ev.voutCount > 0) segnaVideo()
+            }
             MediaPlayer.Event.EndReached -> scope.launch {
                 delay(300)
                 successivo(automatico = true)
@@ -436,6 +453,7 @@ object Riproduttore {
 
     fun ferma() {
         jobCover?.cancel()
+        jobVideo?.cancel()
         try {
             mp?.stop()
         } catch (_: Exception) {
@@ -458,18 +476,43 @@ object Riproduttore {
     fun agganciaVideo(layout: VLCVideoLayout) {
         val p = player()
         if (p.getVLCVout().areViewsAttached()) p.detachViews()
+        voutAttive = 0
         p.attachViews(layout, null, false, false)
-        // Se il video era già partito senza superficie (dirette, o player riaperto),
-        // VLC non crea l'uscita video da solo: riseleziono la traccia per farla ripartire sullo schermo.
-        val id = p.videoTracks?.firstOrNull { it.id >= 0 }?.id
-        if (id != null) {
-            ZLog.i("Riattivo la traccia video $id sulla superficie")
-            p.setVideoTrack(-1)
-            p.setVideoTrack(id)
+        // Non riattivo subito la traccia: al primo avvio la superficie non esiste ancora
+        // (viene creata un attimo dopo) e il video finirebbe nel nulla. Lo fa onSurfacesCreated,
+        // più un controllo di sicurezza nel caso quell'evento arrivi prima delle tracce.
+        controllaVideo(ritardoMs = 1500)
+    }
+
+    /**
+     * Se c'è una traccia video ma VLC non sta disegnando (voutAttive == 0), la riseleziono
+     * così l'uscita video riparte sulla superficie agganciata. Fino a 4 tentativi.
+     */
+    private fun controllaVideo(ritardoMs: Long) {
+        jobVideo?.cancel()
+        jobVideo = scope.launch {
+            delay(ritardoMs)
+            repeat(4) { tentativo ->
+                val p = mp ?: return@launch
+                if (!p.getVLCVout().areViewsAttached()) return@launch
+                val id = p.videoTracks?.firstOrNull { it.id >= 0 }?.id
+                if (id != null && voutAttive == 0) {
+                    ZLog.i("Video nero (tentativo ${tentativo + 1}): riattivo la traccia video $id")
+                    p.setVideoTrack(-1)
+                    p.setVideoTrack(id)
+                } else if (id != null) {
+                    return@launch // il video si vede
+                }
+                delay(1500)
+            }
+            if (voutAttive == 0 && (mp?.videoTracksCount ?: 0) > 0) {
+                ZLog.w("Video ancora nero dopo 4 tentativi")
+            }
         }
     }
 
     fun sganciaVideo() {
+        jobVideo?.cancel()
         val p = mp ?: return
         if (p.getVLCVout().areViewsAttached()) p.detachViews()
     }
