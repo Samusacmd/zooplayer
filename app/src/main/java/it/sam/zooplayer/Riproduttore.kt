@@ -52,6 +52,19 @@ data class StatoPlayer(
     val corrente: Voce? get() = coda.getOrNull(indice)
 }
 
+/**
+ * Dirette DASH: qualità massima e fissa. Con il cambio di qualità automatico VLC parte
+ * basso e poi sale (fino a 1080p): sul decoder hardware di Android il cambio di risoluzione
+ * a metà flusso può lasciare lo schermo nero con l'audio che continua.
+ */
+private const val DIRETTA_ALTEZZA_MAX = 720
+
+/** Quanto aspettare che il riquadro video sia pronto prima di avviare comunque la diretta. */
+private const val ATTESA_SUPERFICIE_MS = 2_500L
+
+/** Se dopo questo tempo una diretta DASH non ha video, si mostra la copertina (diretta solo audio). */
+private const val ATTESA_TRACCIA_VIDEO_MS = 8_000L
+
 /** Tipo di traccia "video" negli eventi ESAdded di libVLC (0 = audio, 1 = video, 2 = sottotitoli). */
 private const val TRACCIA_VIDEO = 1
 
@@ -83,6 +96,11 @@ object Riproduttore {
     /** Uscite video attive secondo VLC: 0 con una traccia video = schermo nero. */
     private var voutAttive = 0
     private var jobVideo: Job? = null
+
+    /** Diretta pronta ma in attesa del riquadro video: parte quando la superficie è agganciata. */
+    private var avvioInAttesa = false
+    private var jobAttesa: Job? = null
+    private var jobSoloAudio: Job? = null
 
     fun init(ctx: Context) {
         app = ctx.applicationContext
@@ -357,18 +375,51 @@ object Riproduttore {
         val v = stato.value.corrente ?: return
         val p = player()
         ZLog.i("Riproduco: ${v.nome} -> ${v.url}")
+        jobAttesa?.cancel()
+        jobSoloAudio?.cancel()
+        avvioInAttesa = false
+        val dash = TipiMedia.estensione(v.url) == "mpd"
         val m = Media(libVlc!!, Uri.parse(Rete.codifica(v.url)))
         m.setHWDecoderEnabled(true, false)
         m.addOption(":network-caching=3000")
+        if (TipiMedia.isDiretta(v.url)) {
+            m.addOption(":adaptive-logic=highest")
+            m.addOption(":adaptive-maxheight=$DIRETTA_ALTEZZA_MAX")
+        }
         p.setMedia(m)
         m.release()
         stato.update {
             it.copy(
                 posizione = 0, durata = 0, coverIncorporata = null, buffering = true,
-                finito = false, errore = null, video = TipiMedia.tipo(v.url) == TipoMedia.VIDEO,
+                finito = false, errore = null,
+                // le dirette DASH si trattano come video da subito: il riquadro si prepara
+                // prima che parta il flusso, invece di rincorrerlo dopo
+                video = TipiMedia.tipo(v.url) == TipoMedia.VIDEO || dash,
             )
         }
-        suona(p)
+        if (dash && !p.getVLCVout().areViewsAttached()) {
+            avvioInAttesa = true
+            ZLog.i("Diretta DASH: attendo il riquadro video prima di avviare")
+            jobAttesa = scope.launch {
+                delay(ATTESA_SUPERFICIE_MS)
+                if (avvioInAttesa && stato.value.corrente?.url == v.url) {
+                    avvioInAttesa = false
+                    ZLog.w("Riquadro video non pronto dopo ${ATTESA_SUPERFICIE_MS / 1000.0} s: avvio comunque")
+                    suona(p)
+                }
+            }
+        } else {
+            suona(p)
+        }
+        if (dash) {
+            jobSoloAudio = scope.launch {
+                delay(ATTESA_TRACCIA_VIDEO_MS)
+                if (stato.value.corrente?.url == v.url && stato.value.inRiproduzione && (mp?.videoTracksCount ?: 0) == 0) {
+                    ZLog.i("Nessuna traccia video in ${v.nome}: diretta solo audio, mostro la copertina")
+                    stato.update { it.copy(video = false) }
+                }
+            }
+        }
         caricaCover(v)
     }
 
@@ -454,6 +505,9 @@ object Riproduttore {
     fun ferma() {
         jobCover?.cancel()
         jobVideo?.cancel()
+        jobAttesa?.cancel()
+        jobSoloAudio?.cancel()
+        avvioInAttesa = false
         try {
             mp?.stop()
         } catch (_: Exception) {
@@ -478,6 +532,12 @@ object Riproduttore {
         if (p.getVLCVout().areViewsAttached()) p.detachViews()
         voutAttive = 0
         p.attachViews(layout, null, false, false)
+        if (avvioInAttesa) {
+            avvioInAttesa = false
+            jobAttesa?.cancel()
+            ZLog.i("Riquadro video agganciato: avvio la diretta")
+            suona(p)
+        }
         // Non riattivo subito la traccia: al primo avvio la superficie non esiste ancora
         // (viene creata un attimo dopo) e il video finirebbe nel nulla. Lo fa onSurfacesCreated,
         // più un controllo di sicurezza nel caso quell'evento arrivi prima delle tracce.
