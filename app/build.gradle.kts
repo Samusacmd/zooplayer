@@ -6,7 +6,7 @@ plugins {
 
 // Versione dell'app (Semantic Versioning: MAJOR.MINOR.PATCH).
 // La CI legge questa riga per dare il nome all'APK: ZooPlayer_v<semVer>.apk
-val semVer = "1.6.5"
+val semVer = "1.7.0"
 val numeroBuild = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
 
 android {
@@ -82,4 +82,9 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0")
     // Motore VLC: legge anche WMA e FLV, che ExoPlayer non supporta
     implementation("org.videolan.android:libvlc-all:3.6.0")
+    // ExoPlayer (Media3): solo per le dirette DASH (.mpd) e HLS (.m3u8)
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-dash:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
+    implementation("androidx.media3:media3-ui:1.4.1")
 }

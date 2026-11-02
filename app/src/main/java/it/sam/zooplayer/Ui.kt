@@ -122,6 +122,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import org.videolan.libvlc.util.VLCVideoLayout
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 
 private val ARANCIO = Color(0xFFFF8F00)
 private val GRIGIO = Color(0xFF9E9E9E)
@@ -696,6 +698,7 @@ private const val SCOMPARSA_COMANDI_TV_MS = 3000L
  * - Pulsante schermo intero: blocca il video in orizzontale finché non lo si ripreme (o Indietro).
  * - Audio: comandi sempre visibili.
  */
+@androidx.annotation.OptIn(markerClass = [androidx.media3.common.util.UnstableApi::class])
 @Composable
 private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
     val view = LocalView.current
@@ -805,11 +808,29 @@ private fun SchermoPlayer(s: StatoPlayer, onChiudi: () -> Unit) {
                         .fillMaxWidth()
                         .then(if (immersivo) Modifier else Modifier.windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)))
                 ) {
-                    AndroidView(
-                        factory = { c -> VLCVideoLayout(c).also { Riproduttore.agganciaVideo(it) } },
-                        modifier = Modifier.fillMaxSize(),
-                        onRelease = { Riproduttore.sganciaVideo() },
-                    )
+                    // dirette: riquadro di ExoPlayer; file: riquadro di VLC
+                    key(s.exo) {
+                        if (s.exo) {
+                            AndroidView(
+                                factory = { c ->
+                                    PlayerView(c).apply {
+                                        useController = false
+                                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                        setShutterBackgroundColor(android.graphics.Color.BLACK)
+                                        Riproduttore.agganciaExo(this)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxSize(),
+                                onRelease = { Riproduttore.sganciaExo(it) },
+                            )
+                        } else {
+                            AndroidView(
+                                factory = { c -> VLCVideoLayout(c).also { Riproduttore.agganciaVideo(it) } },
+                                modifier = Modifier.fillMaxSize(),
+                                onRelease = { Riproduttore.sganciaVideo() },
+                            )
+                        }
+                    }
                     if (immersivo) {
                         // strato trasparente sopra il video: il tocco mostra/nasconde i comandi
                         Box(

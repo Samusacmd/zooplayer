@@ -4,31 +4,44 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.AudioManager
+import android.media.MediaMetadataRetriever
+import android.net.Uri
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
+import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import androidx.media.AudioAttributesCompat
 import androidx.media.AudioFocusRequestCompat
 import androidx.media.AudioManagerCompat
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.Tracks
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.PlayerView
 import coil.imageLoader
 import coil.request.ImageRequest
 import coil.request.SuccessResult
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.media.MediaMetadataRetriever
-import android.net.Uri
-import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.videolan.libvlc.LibVLC
@@ -48,28 +61,14 @@ data class StatoPlayer(
     val video: Boolean = false,
     val coverIncorporata: Bitmap? = null,
     val errore: String? = null,
+    /** true = la voce corrente è suonata da ExoPlayer (dirette), false = da VLC (file). */
+    val exo: Boolean = false,
 ) {
     val corrente: Voce? get() = coda.getOrNull(indice)
 }
 
-/**
- * Dirette DASH: qualità massima e fissa. Con il cambio di qualità automatico VLC parte
- * basso e poi sale (fino a 1080p): sul decoder hardware di Android il cambio di risoluzione
- * a metà flusso può lasciare lo schermo nero con l'audio che continua.
- */
-private const val DIRETTA_ALTEZZA_MAX = 720
-
-/** Quanto aspettare che il riquadro video sia pronto prima di avviare comunque la diretta. */
-private const val ATTESA_SUPERFICIE_MS = 2_500L
-
-/** Se dopo questo tempo una diretta DASH non ha video, si mostra la copertina (diretta solo audio). */
-private const val ATTESA_TRACCIA_VIDEO_MS = 8_000L
-
 /** Nuovi tentativi automatici quando una diretta va in errore (ms di attesa prima di ciascuno). */
 private val RIPROVE_DIRETTA_MS = longArrayOf(1_000, 2_000, 4_000, 8_000)
-
-/** Quanto stare indietro rispetto al "live" nelle dirette DASH: i segmenti più recenti a volte non sono ancora sul CDN. */
-private const val RITARDO_LIVE_MS = 20_000
 
 /**
  * Server gemelli del CDN Mediaset: se uno risponde male si prova l'altro.
@@ -84,11 +83,21 @@ private fun specchio(url: String): String? {
 /** Tipo di traccia "video" negli eventi ESAdded di libVLC (0 = audio, 1 = video, 2 = sottotitoli). */
 private const val TRACCIA_VIDEO = 1
 
-/** Unico player dell'app (libVLC). Vive nel processo; PlayerService lo tiene attivo in background. */
+private enum class Motore { NESSUNO, VLC, EXO }
+
+/**
+ * Unico player dell'app, con due motori:
+ * - ExoPlayer (Media3) per le dirette DASH/HLS (.mpd, .m3u8);
+ * - libVLC per tutti i file (MP3, MP4, WMA, FLV, MKV…), che ExoPlayer non sempre legge.
+ * Vive nel processo; PlayerService lo tiene attivo in background.
+ */
+@androidx.annotation.OptIn(markerClass = [UnstableApi::class])
 object Riproduttore {
     private lateinit var app: Context
     private var libVlc: LibVLC? = null
     private var mp: MediaPlayer? = null
+    private var exo: ExoPlayer? = null
+    private var motore = Motore.NESSUNO
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var jobCover: Job? = null
     val stato = MutableStateFlow(StatoPlayer())
@@ -113,12 +122,9 @@ object Riproduttore {
     private var voutAttive = 0
     private var jobVideo: Job? = null
 
-    /** Diretta pronta ma in attesa del riquadro video: parte quando la superficie è agganciata. */
-    private var avvioInAttesa = false
     private var tentativoDiretta = 0
     private var jobRiprova: Job? = null
-    private var jobAttesa: Job? = null
-    private var jobSoloAudio: Job? = null
+    private var jobPosizione: Job? = null
 
     fun init(ctx: Context) {
         app = ctx.applicationContext
@@ -142,7 +148,7 @@ object Riproduttore {
             app,
             object : BroadcastReceiver() {
                 override fun onReceive(c: Context?, i: Intent?) {
-                    if (mp?.isPlaying == true) {
+                    if (suonaOra()) {
                         ZLog.i("Cuffie scollegate: pausa")
                         pausa()
                     }
@@ -157,6 +163,76 @@ object Riproduttore {
             stato.map { listOf(it.corrente?.url, it.inRiproduzione, it.buffering, it.durata, it.errore, it.coverIncorporata, it.finito) }
                 .distinctUntilChanged()
                 .collect { aggiornaSessione() }
+        }
+    }
+
+    // ── operazioni comuni ai due motori ────────────────────────────────
+
+    /** Sta suonando o sta per suonare (ExoPlayer in caricamento con play premuto). */
+    private fun suonaOra(): Boolean = when (motore) {
+        Motore.VLC -> mp?.isPlaying == true
+        Motore.EXO -> exo?.playWhenReady == true
+        Motore.NESSUNO -> false
+    }
+
+    private fun playMotore() {
+        when (motore) {
+            Motore.VLC -> mp?.play()
+            Motore.EXO -> exo?.play()
+            Motore.NESSUNO -> {}
+        }
+    }
+
+    private fun pausaMotore() {
+        when (motore) {
+            Motore.VLC -> mp?.pause()
+            Motore.EXO -> exo?.pause()
+            Motore.NESSUNO -> {}
+        }
+    }
+
+    private fun volumeMotore(percento: Int) {
+        when (motore) {
+            Motore.VLC -> mp?.setVolume(percento)
+            Motore.EXO -> exo?.volume = percento / 100f
+            Motore.NESSUNO -> {}
+        }
+    }
+
+    private fun posizioneMotore(): Long = when (motore) {
+        Motore.VLC -> mp?.time?.takeIf { it >= 0 } ?: stato.value.posizione
+        Motore.EXO -> exo?.currentPosition ?: stato.value.posizione
+        Motore.NESSUNO -> 0L
+    }
+
+    /** Durata seekabile: per una diretta ExoPlayer è la finestra disponibile (es. 2 minuti). */
+    private fun lunghezzaMotore(): Long = when (motore) {
+        Motore.VLC -> mp?.length ?: 0L
+        Motore.EXO -> exo?.duration?.takeIf { it != C.TIME_UNSET } ?: 0L
+        Motore.NESSUNO -> 0L
+    }
+
+    private fun spostaMotore(ms: Long) {
+        when (motore) {
+            Motore.VLC -> mp?.setTime(ms)
+            Motore.EXO -> exo?.seekTo(ms)
+            Motore.NESSUNO -> {}
+        }
+    }
+
+    /** Ferma il motore che non serve più (si passa da una diretta a un file o viceversa). */
+    private fun fermaMotore(quale: Motore) {
+        try {
+            when (quale) {
+                Motore.VLC -> mp?.stop()
+                Motore.EXO -> {
+                    jobPosizione?.cancel()
+                    exo?.stop()
+                    exo?.clearMediaItems()
+                }
+                Motore.NESSUNO -> {}
+            }
+        } catch (_: Exception) {
         }
     }
 
@@ -187,38 +263,38 @@ object Riproduttore {
     }
 
     private fun focusCambiato(cambio: Int) {
-        val p = mp ?: return
+        if (motore == Motore.NESSUNO) return
         when (cambio) {
             AudioManager.AUDIOFOCUS_LOSS -> {
                 // un'altra app ha preso l'audio in modo stabile: pausa, senza ripartire da soli
                 ZLog.i("Focus audio perso: pausa")
                 hoFocus = false
                 riprendiDopoInterruzione = false
-                if (p.isPlaying) p.pause()
+                if (suonaOra()) pausaMotore()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 // chiamata, sveglia, messaggio vocale: pausa e ripresa automatica alla fine
                 ZLog.i("Interruzione temporanea (es. chiamata): pausa")
-                riprendiDopoInterruzione = p.isPlaying || riprendiDopoInterruzione
-                if (p.isPlaying) p.pause()
+                riprendiDopoInterruzione = suonaOra() || riprendiDopoInterruzione
+                if (suonaOra()) pausaMotore()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 // notifica o navigatore: volume basso per un attimo
-                if (p.isPlaying) {
-                    p.setVolume(25)
+                if (suonaOra()) {
+                    volumeMotore(25)
                     abbassato = true
                 }
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
                 hoFocus = true
                 if (abbassato) {
-                    p.setVolume(100)
+                    volumeMotore(100)
                     abbassato = false
                 }
                 if (riprendiDopoInterruzione) {
                     ZLog.i("Fine interruzione: riprendo")
                     riprendiDopoInterruzione = false
-                    p.play()
+                    playMotore()
                 }
             }
         }
@@ -245,11 +321,10 @@ object Riproduttore {
             s.inRiproduzione -> PlaybackStateCompat.STATE_PLAYING
             else -> PlaybackStateCompat.STATE_PAUSED
         }
-        val posizione = mp?.time?.takeIf { it >= 0 } ?: s.posizione
         sessione.setPlaybackState(
             PlaybackStateCompat.Builder()
                 .setActions(azioni)
-                .setState(st, posizione, if (s.inRiproduzione) 1f else 0f)
+                .setState(st, posizioneMotore(), if (s.inRiproduzione) 1f else 0f)
                 .apply { if (s.errore != null) setErrorMessage(PlaybackStateCompat.ERROR_CODE_APP_ERROR, s.errore) }
                 .build()
         )
@@ -298,13 +373,13 @@ object Riproduttore {
     // ── comandi ────────────────────────────────────────────────────────
 
     /** Avvia (o riprende) solo se Android concede l'audio: durante una chiamata non parte. */
-    private fun suona(p: MediaPlayer) {
+    private fun suona() {
         if (chiediFocus()) {
             if (abbassato) {
-                p.setVolume(100)
+                volumeMotore(100)
                 abbassato = false
             }
-            p.play()
+            playMotore()
         } else {
             stato.update { it.copy(inRiproduzione = false, buffering = false) }
         }
@@ -312,22 +387,24 @@ object Riproduttore {
 
     fun pausa() {
         riprendiDopoInterruzione = false
-        mp?.let { if (it.isPlaying) it.pause() }
+        if (suonaOra()) pausaMotore()
     }
 
     fun riprendi() {
-        val p = mp ?: return
+        if (motore == Motore.NESSUNO) return
         when {
             stato.value.finito || stato.value.errore != null -> avvia()
-            !p.isPlaying -> suona(p)
+            !suonaOra() -> suona()
         }
     }
 
-    private fun player(): MediaPlayer {
+    // ── motore VLC (file) ──────────────────────────────────────────────
+
+    private fun vlc(): MediaPlayer {
         mp?.let { return it }
         val lib = LibVLC(app, arrayListOf("--network-caching=3000", "--http-reconnect", "--no-stats"))
         val p = MediaPlayer(lib)
-        p.setEventListener { ev -> evento(ev) }
+        p.setEventListener { ev -> eventoVlc(ev) }
         // la superficie video è pronta solo quando Android l'ha creata, non quando la si aggancia
         p.getVLCVout().addCallback(object : IVLCVout.Callback {
             override fun onSurfacesCreated(vlcVout: IVLCVout) {
@@ -343,14 +420,14 @@ object Riproduttore {
         return p
     }
 
-    private fun evento(ev: MediaPlayer.Event) {
+    private fun eventoVlc(ev: MediaPlayer.Event) {
+        if (motore != Motore.VLC) return
         when (ev.type) {
             MediaPlayer.Event.Playing -> {
                 stato.update { it.copy(inRiproduzione = true, buffering = false, finito = false, errore = null) }
                 stato.value.corrente?.let { Db.segnaAscoltato(it.url) }
                 if ((mp?.videoTracksCount ?: 0) > 0) segnaVideo()
             }
-            // una traccia video comparsa nel flusso: è così che si riconoscono le dirette video
             MediaPlayer.Event.ESAdded ->
                 if (ev.esChangedType == TRACCIA_VIDEO) segnaVideo()
             MediaPlayer.Event.Paused, MediaPlayer.Event.Stopped ->
@@ -371,30 +448,131 @@ object Riproduttore {
                 delay(300)
                 successivo(automatico = true)
             }
-            MediaPlayer.Event.EncounteredError -> {
-                val c = stato.value.corrente
-                ZLog.e("Errore di riproduzione: ${c?.url} (tentativo ${tentativoDiretta + 1})")
-                if (c != null && TipiMedia.isDiretta(c.url) && tentativoDiretta < RIPROVE_DIRETTA_MS.size) {
-                    // le dirette Mediaset a volte rifiutano il primo collegamento: riprovo da solo,
-                    // alternando il server gemello, invece di lasciare lo schermo fermo
-                    val prossimo = tentativoDiretta + 1
-                    val attesa = RIPROVE_DIRETTA_MS[tentativoDiretta]
-                    ZLog.i("Diretta non partita: riprovo tra ${attesa / 1000} s (tentativo ${prossimo + 1} di ${RIPROVE_DIRETTA_MS.size + 1})")
-                    stato.update { it.copy(inRiproduzione = false, buffering = true, errore = null) }
-                    jobRiprova?.cancel()
-                    jobRiprova = scope.launch {
-                        delay(attesa)
-                        if (stato.value.corrente?.url == c.url) avvia(prossimo)
-                    }
-                } else {
-                    val msg = if (c != null && TipiMedia.isDiretta(c.url))
-                        "Diretta non disponibile in questo momento: riprova tra poco"
-                    else "Impossibile riprodurre questo file"
-                    stato.update { it.copy(inRiproduzione = false, buffering = false, errore = msg) }
+            MediaPlayer.Event.EncounteredError -> erroreRiproduzione("errore VLC")
+        }
+    }
+
+    // ── motore ExoPlayer (dirette) ─────────────────────────────────────
+
+    private fun exoPlayer(): ExoPlayer {
+        exo?.let { return it }
+        val http = DefaultHttpDataSource.Factory()
+            .setUserAgent(Rete.UA)
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(20_000)
+        val e = ExoPlayer.Builder(app)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(app).setDataSourceFactory(http))
+            .build()
+        e.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) = aggiornaDaExo()
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = aggiornaDaExo()
+
+            override fun onTracksChanged(tracks: Tracks) {
+                if (motore != Motore.EXO || tracks.groups.isEmpty()) return
+                val haVideo = tracks.containsType(C.TRACK_TYPE_VIDEO)
+                val c = stato.value.corrente ?: return
+                if (haVideo != stato.value.video) {
+                    ZLog.i(if (haVideo) "Traccia video rilevata: ${c.nome}" else "Nessuna traccia video in ${c.nome}: mostro la copertina")
+                    stato.update { it.copy(video = haVideo) }
                 }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                if (motore != Motore.EXO) return
+                val e2 = exo ?: return
+                if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
+                    // rimasti troppo indietro nella diretta (es. lunga pausa): si torna al live
+                    ZLog.i("Diretta: rimasto indietro, torno al live")
+                    e2.seekToDefaultPosition()
+                    e2.prepare()
+                    return
+                }
+                val http = generateSequence(error.cause) { it.cause }
+                    .filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
+                val dettaglio = buildString {
+                    append(error.errorCodeName)
+                    if (http != null) append(" HTTP ${http.responseCode} su ${http.dataSpec.uri}")
+                    error.cause?.message?.let { append(" - ").append(it.take(200)) }
+                }
+                erroreRiproduzione(dettaglio)
+            }
+        })
+        exo = e
+        ZLog.i("ExoPlayer inizializzato")
+        return e
+    }
+
+    private fun aggiornaDaExo() {
+        if (motore != Motore.EXO) return
+        val e = exo ?: return
+        val st = e.playbackState
+        when (st) {
+            Player.STATE_ENDED -> {
+                stato.update { it.copy(inRiproduzione = false, buffering = false) }
+                scope.launch {
+                    delay(300)
+                    successivo(automatico = true)
+                }
+            }
+            Player.STATE_READY -> {
+                stato.update { it.copy(inRiproduzione = e.playWhenReady, buffering = false, errore = null) }
+                if (e.playWhenReady) {
+                    tentativoDiretta = 0
+                    stato.value.corrente?.let { Db.segnaAscoltato(it.url) }
+                }
+            }
+            Player.STATE_BUFFERING ->
+                stato.update { it.copy(inRiproduzione = e.playWhenReady, buffering = true) }
+            Player.STATE_IDLE ->
+                stato.update { it.copy(inRiproduzione = false) }
+        }
+    }
+
+    /** ExoPlayer non manda la posizione a eventi come VLC: la leggo ogni mezzo secondo. */
+    private fun seguiPosizioneExo() {
+        jobPosizione?.cancel()
+        jobPosizione = scope.launch {
+            while (isActive && motore == Motore.EXO) {
+                val e = exo ?: break
+                val live = e.isCurrentMediaItemLive
+                stato.update {
+                    it.copy(
+                        posizione = e.currentPosition.coerceAtLeast(0),
+                        // per una diretta la barra resta disattivata ("live")
+                        durata = if (live) 0L else (e.duration.takeIf { d -> d != C.TIME_UNSET } ?: 0L),
+                    )
+                }
+                delay(500)
             }
         }
     }
+
+    // ── errori e nuovi tentativi ───────────────────────────────────────
+
+    private fun erroreRiproduzione(dettaglio: String) {
+        val c = stato.value.corrente
+        ZLog.e("Errore di riproduzione: ${c?.url} (tentativo ${tentativoDiretta + 1}) - $dettaglio")
+        if (c != null && TipiMedia.isDiretta(c.url) && tentativoDiretta < RIPROVE_DIRETTA_MS.size) {
+            // riprovo da solo, alternando il server gemello, invece di lasciare lo schermo fermo
+            val prossimo = tentativoDiretta + 1
+            val attesa = RIPROVE_DIRETTA_MS[tentativoDiretta]
+            ZLog.i("Diretta non partita: riprovo tra ${attesa / 1000} s (tentativo ${prossimo + 1} di ${RIPROVE_DIRETTA_MS.size + 1})")
+            stato.update { it.copy(inRiproduzione = false, buffering = true, errore = null) }
+            jobRiprova?.cancel()
+            jobRiprova = scope.launch {
+                delay(attesa)
+                if (stato.value.corrente?.url == c.url) avvia(prossimo)
+            }
+        } else {
+            val msg = if (c != null && TipiMedia.isDiretta(c.url))
+                "Diretta non disponibile in questo momento: riprova tra poco"
+            else "Impossibile riprodurre questo file"
+            stato.update { it.copy(inRiproduzione = false, buffering = false, errore = msg) }
+        }
+    }
+
+    // ── avvio ──────────────────────────────────────────────────────────
 
     fun riproduci(coda: List<Voce>, indice: Int) {
         if (indice !in coda.indices) return
@@ -410,57 +588,46 @@ object Riproduttore {
     /** tentativo > 0 solo per i nuovi tentativi automatici delle dirette. */
     private fun avvia(tentativo: Int = 0) {
         val v = stato.value.corrente ?: return
-        val p = player()
         jobRiprova?.cancel()
+        jobVideo?.cancel()
         tentativoDiretta = tentativo
+        val diretta = TipiMedia.isDiretta(v.url)
+        val nuovo = if (diretta) Motore.EXO else Motore.VLC
+        if (motore != nuovo) fermaMotore(motore)
+        motore = nuovo
         // nei tentativi dispari provo il server gemello, se esiste
         val sorgente = if (tentativo % 2 == 1) specchio(v.url) ?: v.url else v.url
-        ZLog.i("Riproduco: ${v.nome} -> $sorgente" + if (tentativo > 0) " (tentativo ${tentativo + 1})" else "")
-        jobAttesa?.cancel()
-        jobSoloAudio?.cancel()
-        avvioInAttesa = false
+        ZLog.i(
+            "Riproduco con ${if (diretta) "ExoPlayer" else "VLC"}: ${v.nome} -> $sorgente" +
+                if (tentativo > 0) " (tentativo ${tentativo + 1})" else ""
+        )
         val dash = TipiMedia.estensione(v.url) == "mpd"
-        val m = Media(libVlc!!, Uri.parse(Rete.codifica(sorgente)))
-        m.setHWDecoderEnabled(true, false)
-        m.addOption(":network-caching=3000")
-        if (TipiMedia.isDiretta(v.url)) {
-            m.addOption(":adaptive-logic=highest")
-            m.addOption(":adaptive-maxheight=$DIRETTA_ALTEZZA_MAX")
-            m.addOption(":adaptive-livedelay=$RITARDO_LIVE_MS")
-        }
-        p.setMedia(m)
-        m.release()
         stato.update {
             it.copy(
                 posizione = 0, durata = 0, coverIncorporata = null, buffering = true,
-                finito = false, errore = null,
-                // le dirette DASH si trattano come video da subito: il riquadro si prepara
-                // prima che parta il flusso, invece di rincorrerlo dopo
+                finito = false, errore = null, exo = diretta,
+                // le dirette DASH si aprono subito come video; se poi non c'è video lo dicono le tracce
                 video = TipiMedia.tipo(v.url) == TipoMedia.VIDEO || dash,
             )
         }
-        if (dash && !p.getVLCVout().areViewsAttached()) {
-            avvioInAttesa = true
-            ZLog.i("Diretta DASH: attendo il riquadro video prima di avviare")
-            jobAttesa = scope.launch {
-                delay(ATTESA_SUPERFICIE_MS)
-                if (avvioInAttesa && stato.value.corrente?.url == v.url) {
-                    avvioInAttesa = false
-                    ZLog.w("Riquadro video non pronto dopo ${ATTESA_SUPERFICIE_MS / 1000.0} s: avvio comunque")
-                    suona(p)
-                }
-            }
+        if (diretta) {
+            val e = exoPlayer()
+            val item = MediaItem.Builder()
+                .setUri(Rete.codifica(sorgente))
+                .setMimeType(if (dash) MimeTypes.APPLICATION_MPD else MimeTypes.APPLICATION_M3U8)
+                .build()
+            e.setMediaItem(item)
+            e.prepare()
+            seguiPosizioneExo()
+            suona()
         } else {
-            suona(p)
-        }
-        if (dash) {
-            jobSoloAudio = scope.launch {
-                delay(ATTESA_TRACCIA_VIDEO_MS)
-                if (stato.value.corrente?.url == v.url && stato.value.inRiproduzione && (mp?.videoTracksCount ?: 0) == 0) {
-                    ZLog.i("Nessuna traccia video in ${v.nome}: diretta solo audio, mostro la copertina")
-                    stato.update { it.copy(video = false) }
-                }
-            }
+            val p = vlc()
+            val m = Media(libVlc!!, Uri.parse(Rete.codifica(sorgente)))
+            m.setHWDecoderEnabled(true, false)
+            m.addOption(":network-caching=3000")
+            p.setMedia(m)
+            m.release()
+            suona()
         }
         caricaCover(v)
     }
@@ -500,25 +667,26 @@ object Riproduttore {
     }
 
     fun playPausa() {
-        val p = mp ?: return
+        if (motore == Motore.NESSUNO) return
         when {
             stato.value.finito || stato.value.errore != null -> avvia()
-            p.isPlaying -> pausa()
-            else -> suona(p)
+            suonaOra() -> pausa()
+            else -> suona()
         }
     }
 
     fun salta(ms: Long) {
-        val p = mp ?: return
-        var t = (p.time + ms).coerceAtLeast(0)
-        if (p.length > 0) t = t.coerceAtMost(p.length - 1000)
-        p.setTime(t)
+        if (motore == Motore.NESSUNO) return
+        var t = (posizioneMotore() + ms).coerceAtLeast(0)
+        val lunghezza = lunghezzaMotore()
+        if (lunghezza > 0) t = t.coerceAtMost(lunghezza - 1000)
+        spostaMotore(t)
         stato.update { it.copy(posizione = t) }
         aggiornaSessione()
     }
 
     fun vaiA(ms: Long) {
-        mp?.setTime(ms)
+        spostaMotore(ms)
         stato.update { it.copy(posizione = ms) }
         aggiornaSessione()
     }
@@ -547,15 +715,12 @@ object Riproduttore {
     fun ferma() {
         jobCover?.cancel()
         jobVideo?.cancel()
-        jobAttesa?.cancel()
-        jobSoloAudio?.cancel()
         jobRiprova?.cancel()
-        avvioInAttesa = false
+        jobPosizione?.cancel()
         tentativoDiretta = 0
-        try {
-            mp?.stop()
-        } catch (_: Exception) {
-        }
+        fermaMotore(Motore.VLC)
+        fermaMotore(Motore.EXO)
+        motore = Motore.NESSUNO
         abbandonaFocus()
         jobArt?.cancel()
         urlArt = null
@@ -571,17 +736,22 @@ object Riproduttore {
         stato.update { it.copy(video = true) }
     }
 
+    // ── superficie video ───────────────────────────────────────────────
+
+    /** Riquadro video di ExoPlayer: si può agganciare in qualsiasi momento, anche a diretta avviata. */
+    fun agganciaExo(view: PlayerView) {
+        view.player = exoPlayer()
+    }
+
+    fun sganciaExo(view: PlayerView) {
+        view.player = null
+    }
+
     fun agganciaVideo(layout: VLCVideoLayout) {
-        val p = player()
+        val p = vlc()
         if (p.getVLCVout().areViewsAttached()) p.detachViews()
         voutAttive = 0
         p.attachViews(layout, null, false, false)
-        if (avvioInAttesa) {
-            avvioInAttesa = false
-            jobAttesa?.cancel()
-            ZLog.i("Riquadro video agganciato: avvio la diretta")
-            suona(p)
-        }
         // Non riattivo subito la traccia: al primo avvio la superficie non esiste ancora
         // (viene creata un attimo dopo) e il video finirebbe nel nulla. Lo fa onSurfacesCreated,
         // più un controllo di sicurezza nel caso quell'evento arrivi prima delle tracce.
@@ -594,11 +764,12 @@ object Riproduttore {
      */
     private fun controllaVideo(ritardoMs: Long) {
         jobVideo?.cancel()
+        if (motore != Motore.VLC) return
         jobVideo = scope.launch {
             delay(ritardoMs)
             repeat(4) { tentativo ->
                 val p = mp ?: return@launch
-                if (!p.getVLCVout().areViewsAttached()) return@launch
+                if (motore != Motore.VLC || !p.getVLCVout().areViewsAttached()) return@launch
                 val id = p.videoTracks?.firstOrNull { it.id >= 0 }?.id
                 if (id != null && voutAttive == 0) {
                     ZLog.i("Video nero (tentativo ${tentativo + 1}): riattivo la traccia video $id")

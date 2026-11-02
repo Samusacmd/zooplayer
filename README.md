@@ -1,9 +1,10 @@
-# ZooPlayer Android 1.6.5
+# ZooPlayer Android 1.7.0
 
 Porting per Android (telefono, tablet, Android TV, Fire TV) di ZooPlayer 2.8.0 desktop.
 Legge gli stessi JSON generati dal Paste Tool (`name` / `urlList` / `url` / `imageUrl`).
 
 ## Changelog
+- **1.7.0** Dirette DASH (.mpd) e HLS (.m3u8) riprodotte con ExoPlayer (Media3) invece che con VLC; i file (MP3, MP4, WMA, FLV…) restano su VLC. Il log riporta il codice HTTP preciso quando una diretta fallisce. Tentativi automatici e server gemello Mediaset mantenuti.
 - **1.6.5** Dirette che vanno in errore all'avvio: fino a 4 nuovi tentativi automatici (1/2/4/8 s), alternando il server gemello Mediaset (live03-col / live03-seg); le dirette partono 20 s indietro rispetto al live per non chiedere segmenti non ancora pronti; messaggio chiaro se la diretta resta non disponibile.
 - **1.6.4** Dirette DASH (.mpd): qualità fissa fino a 720p (niente cambi di risoluzione che lasciavano lo schermo nero), il flusso parte solo quando il riquadro video è pronto, e se dopo 8 s non c'è video si mostra la copertina.
 - **1.6.3** Pastebin e HTTP 429: richieste distanziate (1,2 s), dopo un 429 pausa e nuovo tentativo (5/15/30/60 s o Retry-After), se l'aggiornamento fallisce si usa la copia salvata; l'indice segnala gli elenchi non letti.
@@ -23,7 +24,7 @@ Legge gli stessi JSON generati dal Paste Tool (`name` / `urlList` / `url` / `ima
 - **1.0.0** Prima versione Android, porting di ZooPlayer desktop 2.8.0.
 
 ## Versionamento (SemVer)
-La versione è in `app/build.gradle.kts`, riga `val semVer = "1.6.5"`.
+La versione è in `app/build.gradle.kts`, riga `val semVer = "1.7.0"`.
 - `versionName` = semVer
 - `versionCode` = numero di esecuzione di GitHub Actions (`GITHUB_RUN_NUMBER`)
 - l'APK esce come `ZooPlayer_v<semVer>.apk`
@@ -47,7 +48,7 @@ devi disinstallare (perdendo preferiti, ascoltati e indice).
 | Funzione 2.8.0 | Android 1.0.0 |
 |---|---|
 | Navigazione elenchi annidati, link pastebin → raw | ✔ |
-| Riproduzione video/audio (anche WMA, FLV) | ✔ libVLC |
+| Riproduzione video/audio (anche WMA, FLV) | ✔ libVLC (file) + ExoPlayer (dirette) |
 | Stream radio (es. R101) riconosciuti come stream | ✔ |
 | ±10 s, precedente/successivo, avanzamento automatico | ✔ |
 | Viste lista / elenco / box cover | ✔ |
