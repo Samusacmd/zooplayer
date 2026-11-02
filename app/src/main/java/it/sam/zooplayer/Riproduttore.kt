@@ -65,6 +65,22 @@ private const val ATTESA_SUPERFICIE_MS = 2_500L
 /** Se dopo questo tempo una diretta DASH non ha video, si mostra la copertina (diretta solo audio). */
 private const val ATTESA_TRACCIA_VIDEO_MS = 8_000L
 
+/** Nuovi tentativi automatici quando una diretta va in errore (ms di attesa prima di ciascuno). */
+private val RIPROVE_DIRETTA_MS = longArrayOf(1_000, 2_000, 4_000, 8_000)
+
+/** Quanto stare indietro rispetto al "live" nelle dirette DASH: i segmenti più recenti a volte non sono ancora sul CDN. */
+private const val RITARDO_LIVE_MS = 20_000
+
+/**
+ * Server gemelli del CDN Mediaset: se uno risponde male si prova l'altro.
+ * live03-col <-> live03-seg (stesso percorso, stesso contenuto).
+ */
+private fun specchio(url: String): String? {
+    val m = Regex("""^(https?://live\d+-)(col|seg)(\.msr\.cdn\.mediaset\.net/.*)$""").find(url) ?: return null
+    val altro = if (m.groupValues[2] == "col") "seg" else "col"
+    return m.groupValues[1] + altro + m.groupValues[3]
+}
+
 /** Tipo di traccia "video" negli eventi ESAdded di libVLC (0 = audio, 1 = video, 2 = sottotitoli). */
 private const val TRACCIA_VIDEO = 1
 
@@ -99,6 +115,8 @@ object Riproduttore {
 
     /** Diretta pronta ma in attesa del riquadro video: parte quando la superficie è agganciata. */
     private var avvioInAttesa = false
+    private var tentativoDiretta = 0
+    private var jobRiprova: Job? = null
     private var jobAttesa: Job? = null
     private var jobSoloAudio: Job? = null
 
@@ -354,8 +372,26 @@ object Riproduttore {
                 successivo(automatico = true)
             }
             MediaPlayer.Event.EncounteredError -> {
-                ZLog.e("Errore di riproduzione: ${stato.value.corrente?.url}")
-                stato.update { it.copy(inRiproduzione = false, buffering = false, errore = "Impossibile riprodurre questo file") }
+                val c = stato.value.corrente
+                ZLog.e("Errore di riproduzione: ${c?.url} (tentativo ${tentativoDiretta + 1})")
+                if (c != null && TipiMedia.isDiretta(c.url) && tentativoDiretta < RIPROVE_DIRETTA_MS.size) {
+                    // le dirette Mediaset a volte rifiutano il primo collegamento: riprovo da solo,
+                    // alternando il server gemello, invece di lasciare lo schermo fermo
+                    val prossimo = tentativoDiretta + 1
+                    val attesa = RIPROVE_DIRETTA_MS[tentativoDiretta]
+                    ZLog.i("Diretta non partita: riprovo tra ${attesa / 1000} s (tentativo ${prossimo + 1} di ${RIPROVE_DIRETTA_MS.size + 1})")
+                    stato.update { it.copy(inRiproduzione = false, buffering = true, errore = null) }
+                    jobRiprova?.cancel()
+                    jobRiprova = scope.launch {
+                        delay(attesa)
+                        if (stato.value.corrente?.url == c.url) avvia(prossimo)
+                    }
+                } else {
+                    val msg = if (c != null && TipiMedia.isDiretta(c.url))
+                        "Diretta non disponibile in questo momento: riprova tra poco"
+                    else "Impossibile riprodurre questo file"
+                    stato.update { it.copy(inRiproduzione = false, buffering = false, errore = msg) }
+                }
             }
         }
     }
@@ -371,20 +407,26 @@ object Riproduttore {
         }
     }
 
-    private fun avvia() {
+    /** tentativo > 0 solo per i nuovi tentativi automatici delle dirette. */
+    private fun avvia(tentativo: Int = 0) {
         val v = stato.value.corrente ?: return
         val p = player()
-        ZLog.i("Riproduco: ${v.nome} -> ${v.url}")
+        jobRiprova?.cancel()
+        tentativoDiretta = tentativo
+        // nei tentativi dispari provo il server gemello, se esiste
+        val sorgente = if (tentativo % 2 == 1) specchio(v.url) ?: v.url else v.url
+        ZLog.i("Riproduco: ${v.nome} -> $sorgente" + if (tentativo > 0) " (tentativo ${tentativo + 1})" else "")
         jobAttesa?.cancel()
         jobSoloAudio?.cancel()
         avvioInAttesa = false
         val dash = TipiMedia.estensione(v.url) == "mpd"
-        val m = Media(libVlc!!, Uri.parse(Rete.codifica(v.url)))
+        val m = Media(libVlc!!, Uri.parse(Rete.codifica(sorgente)))
         m.setHWDecoderEnabled(true, false)
         m.addOption(":network-caching=3000")
         if (TipiMedia.isDiretta(v.url)) {
             m.addOption(":adaptive-logic=highest")
             m.addOption(":adaptive-maxheight=$DIRETTA_ALTEZZA_MAX")
+            m.addOption(":adaptive-livedelay=$RITARDO_LIVE_MS")
         }
         p.setMedia(m)
         m.release()
@@ -507,7 +549,9 @@ object Riproduttore {
         jobVideo?.cancel()
         jobAttesa?.cancel()
         jobSoloAudio?.cancel()
+        jobRiprova?.cancel()
         avvioInAttesa = false
+        tentativoDiretta = 0
         try {
             mp?.stop()
         } catch (_: Exception) {
